@@ -39,6 +39,25 @@ var (
 	ErrUploadIncomplete = errors.New("upload incomplete: connection cut or missing bytes")
 )
 
+// SetTransferLimits fija cuántas descargas y subidas simultáneas admite el proxy.
+// Por defecto es 1 y 1 (como el cliente oficial de escritorio). En modo web las
+// descargas van con URL firmada a CloudFront y la API la llama el navegador, así
+// que se puede abrir más. Debe llamarse al arrancar, antes de servir peticiones.
+func SetTransferLimits(downloads, uploads int) {
+	if downloads < 1 {
+		downloads = 1
+	}
+	if uploads < 1 {
+		uploads = 1
+	}
+	downloadSem = make(chan struct{}, downloads)
+	uploadSem = make(chan struct{}, uploads)
+	uploadBufferSem = make(chan struct{}, uploads)
+	// El tope conjunto ya no frena a unas con otras: una subida masiva no debe
+	// impedir la reproducción.
+	globalTransferSem = make(chan struct{}, downloads+uploads)
+}
+
 type uploadGuardKey struct{}
 
 type uploadGuard struct {

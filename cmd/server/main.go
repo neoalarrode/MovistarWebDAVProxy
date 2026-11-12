@@ -118,6 +118,10 @@ func main() {
 		}
 	}
 
+	maxDown, maxUp := config.TransferLimits(client.WebMode())
+	webdav.SetTransferLimits(maxDown, maxUp)
+	logger.Log("[WebDAV] 🚦 Transferencias simultáneas: %d descargas, %d subidas", maxDown, maxUp)
+
 	// 1. Servidor WebDAV (sin ReadTimeout/WriteTimeout globales para no cortar transferencias grandes)
 	webdavServer := webdav.NewServerWithAuth(client, davAuth, metaStore)
 
