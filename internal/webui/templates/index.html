@@ -43,8 +43,27 @@
     </header>
 
     <div class="grid grid-cols-1 lg:grid-cols-2 gap-6 mb-8">
+        <!-- Sesión web (modo web): sustituye a la tarjeta de dispositivo OAuth -->
+        <div id="web-session-card" class="hidden bg-white rounded-2xl shadow-sm border border-slate-200 p-6 flex flex-col justify-between">
+            <div>
+                <div class="mb-4 flex items-center justify-between">
+                    <h2 class="text-lg font-semibold flex items-center"><span class="mr-2">🌐</span> Sesión web de Movistar Cloud</h2>
+                    <span id="ws-state" class="px-3 py-1 rounded-full text-xs font-semibold bg-slate-100 text-slate-600">Comprobando...</span>
+                </div>
+                <div class="bg-slate-50 border border-slate-200 rounded-xl p-3 mb-4 text-xs space-y-1.5">
+                    <div class="flex justify-between text-slate-600"><span class="font-medium">Activa desde:</span><span id="ws-since" class="font-semibold">-</span></div>
+                    <div class="flex justify-between text-slate-600"><span class="font-medium">Última comprobación:</span><span id="ws-checked" class="font-semibold">-</span></div>
+                    <div class="flex justify-between text-slate-600"><span class="font-medium">Modo:</span><span class="font-semibold text-emerald-700">Navegador (Chromium sin pantalla)</span></div>
+                </div>
+                <p id="ws-hint" class="hidden text-xs text-rose-700 bg-rose-50 border border-rose-200 rounded-xl p-3 mb-4">La sesión ha caducado: inicia sesión de nuevo para que el proxy vuelva a funcionar.</p>
+            </div>
+            <div class="pt-4 border-t border-slate-100 mt-2">
+                <a id="ws-login-btn" href="/web-login/" target="_blank" rel="noopener" class="block w-full text-center bg-slate-100 hover:bg-slate-200 text-slate-700 font-semibold py-2.5 px-4 rounded-xl transition text-sm border border-slate-200">🔐 Abrir inicio de sesión</a>
+            </div>
+        </div>
+
         <!-- Autenticación y Dispositivo -->
-        <div class="bg-white rounded-2xl shadow-sm border border-slate-200 p-6 flex flex-col justify-between">
+        <div id="device-card" class="bg-white rounded-2xl shadow-sm border border-slate-200 p-6 flex flex-col justify-between">
             <div>
                 <div class="mb-4">
                     <h2 class="text-lg font-semibold flex items-center"><span class="mr-2">📱</span> Dispositivo & Cuenta</h2>
@@ -122,6 +141,38 @@
                     ■ Pausar WebDAV
                 </button>
             </div>
+        </div>
+    </div>
+
+    <!-- Copia a la nube (script externo con rclone) -->
+    <div id="copy-card" class="hidden bg-white rounded-2xl shadow-sm border border-slate-200 p-6 mb-8">
+        <div class="flex flex-wrap items-center justify-between gap-2 mb-4">
+            <h2 class="text-lg font-semibold flex items-center"><span class="mr-2">☁️</span> Copia a la nube</h2>
+            <span id="cp-updated" class="text-xs text-slate-500">-</span>
+        </div>
+        <div id="cp-stop" class="hidden text-xs text-rose-800 bg-rose-50 border border-rose-200 rounded-xl p-3 mb-4"></div>
+        <div class="mb-4">
+            <div class="flex flex-wrap justify-between text-sm mb-1.5 gap-2">
+                <span class="font-semibold" id="cp-current">Sin copia en curso</span>
+                <span class="font-mono text-slate-600" id="cp-amount">-</span>
+            </div>
+            <div class="w-full h-3 bg-slate-100 rounded-full overflow-hidden border border-slate-200">
+                <div id="cp-bar" class="h-full bg-blue-600 transition-all" style="width:0%"></div>
+            </div>
+            <div class="flex flex-wrap justify-between text-xs text-slate-600 mt-1.5 gap-2">
+                <span>Velocidad: <span id="cp-speed" class="font-semibold">-</span></span>
+                <span>Tiempo restante: <span id="cp-eta" class="font-semibold">-</span></span>
+                <span>Errores: <span id="cp-errors" class="font-semibold">0</span></span>
+            </div>
+        </div>
+        <div id="cp-libs" class="flex flex-wrap gap-1.5 mb-4"></div>
+        <pre id="cp-errlist" class="hidden text-[11px] font-mono bg-slate-50 border border-slate-200 rounded-xl p-3 mb-4 overflow-x-auto whitespace-pre-wrap text-rose-700"></pre>
+        <div class="flex flex-wrap items-center gap-2 pt-4 border-t border-slate-100 text-sm">
+            <span class="text-slate-600">Límite de ancho de banda: <span id="cp-bw" class="font-mono font-semibold">off</span></span>
+            <input id="cp-bw-input" type="text" placeholder="Ej: 20M" class="w-24 px-2 py-1.5 bg-slate-50 border border-slate-200 rounded-lg font-mono text-xs outline-none focus:border-blue-500">
+            <button onclick="setBWLimit(document.getElementById('cp-bw-input').value)" class="px-3 py-1.5 bg-blue-600 hover:bg-blue-700 text-white font-semibold rounded-lg text-xs">Aplicar</button>
+            <button onclick="setBWLimit('off')" class="px-3 py-1.5 bg-slate-100 hover:bg-slate-200 text-slate-700 font-semibold rounded-lg text-xs border border-slate-200">Sin límite</button>
+            <span class="text-xs text-slate-500">(en MB/s: 20M ≈ 160 Mbps)</span>
         </div>
     </div>
 
@@ -331,7 +382,109 @@
             setInterval(checkStatus, 5000);
             fetchLogs();
             logInterval = setInterval(fetchLogs, 2000);
+            initWebMode();
         });
+
+        // ---- Modo web: sesión del navegador y copia a la nube ----
+        function fmtTime(iso) {
+            if (!iso) return '-';
+            const d = new Date(iso);
+            return isNaN(d) ? iso : d.toLocaleString('es-ES', {day:'2-digit', month:'2-digit', hour:'2-digit', minute:'2-digit'});
+        }
+
+        async function initWebMode() {
+            try {
+                const res = await fetch('/web_session');
+                const data = await res.json();
+                if (data.enabled) {
+                    document.getElementById('device-card').classList.add('hidden');
+                    document.getElementById('web-session-card').classList.remove('hidden');
+                    renderWebSession(data);
+                    setInterval(refreshWebSession, 10000);
+                }
+            } catch (err) {}
+            refreshCopyStatus();
+            setInterval(refreshCopyStatus, 10000);
+        }
+
+        async function refreshWebSession() {
+            try { renderWebSession(await (await fetch('/web_session')).json()); } catch (err) {}
+        }
+
+        let webStorageLoaded = false;
+        function renderWebSession(d) {
+            const st = document.getElementById('ws-state');
+            const btn = document.getElementById('ws-login-btn');
+            if (d.logged_in) {
+                st.textContent = '✔ Activa';
+                st.className = 'px-3 py-1 rounded-full text-xs font-semibold bg-emerald-100 text-emerald-800';
+                btn.className = 'block w-full text-center bg-slate-100 hover:bg-slate-200 text-slate-700 font-semibold py-2.5 px-4 rounded-xl transition text-sm border border-slate-200';
+                document.getElementById('ws-hint').classList.add('hidden');
+                if (!webStorageLoaded) { webStorageLoaded = true; loadStorageInfo(''); }
+            } else {
+                st.textContent = '✘ Caducada';
+                st.className = 'px-3 py-1 rounded-full text-xs font-semibold bg-rose-100 text-rose-800';
+                btn.className = 'block w-full text-center bg-emerald-600 hover:bg-emerald-700 text-white font-semibold py-2.5 px-4 rounded-xl shadow-sm transition text-sm';
+                document.getElementById('ws-hint').classList.remove('hidden');
+            }
+            document.getElementById('ws-since').textContent = fmtTime(d.since);
+            document.getElementById('ws-checked').textContent = fmtTime(d.checked_at);
+        }
+
+        const libStyle = {
+            done:    ['✔', 'bg-emerald-50 text-emerald-800 border-emerald-200'],
+            running: ['⏳', 'bg-blue-50 text-blue-800 border-blue-300'],
+            failed:  ['✘', 'bg-rose-50 text-rose-800 border-rose-200'],
+            pending: ['·', 'bg-slate-50 text-slate-500 border-slate-200'],
+        };
+
+        async function refreshCopyStatus() {
+            let d;
+            try { d = await (await fetch('/copy_status')).json(); } catch (err) { return; }
+            const card = document.getElementById('copy-card');
+            if (!d.enabled) { card.classList.add('hidden'); return; }
+            card.classList.remove('hidden');
+
+            const stop = document.getElementById('cp-stop');
+            if (d.stop) { stop.textContent = '⛔ Copia detenida: ' + d.stop; stop.classList.remove('hidden'); }
+            else stop.classList.add('hidden');
+
+            const pct = parseInt(d.percent, 10);
+            document.getElementById('cp-current').textContent = d.current ? 'Copiando: ' + d.current : 'Sin copia en curso';
+            document.getElementById('cp-amount').textContent = d.transferred ? `${d.transferred} / ${d.total} (${d.percent}%)` : '-';
+            document.getElementById('cp-bar').style.width = (isNaN(pct) ? 0 : pct) + '%';
+            document.getElementById('cp-speed').textContent = d.current && d.speed ? d.speed : '-';
+            document.getElementById('cp-eta').textContent = d.current && d.eta ? d.eta : '-';
+            document.getElementById('cp-errors').textContent = d.error_count || 0;
+            document.getElementById('cp-updated').textContent = d.stats_at ? 'Actualizado: ' + d.stats_at : '-';
+            document.getElementById('cp-bw').textContent = d.bwlimit || 'off';
+
+            const libs = document.getElementById('cp-libs');
+            libs.replaceChildren();
+            (d.libraries || []).forEach(l => {
+                const [icon, cls] = libStyle[l.state] || libStyle.pending;
+                const chip = document.createElement('span');
+                chip.className = 'px-2.5 py-1 rounded-full text-xs font-semibold border ' + cls;
+                chip.textContent = icon + ' ' + l.name;
+                chip.title = [l.start && 'Inicio: ' + l.start, l.end && 'Fin: ' + l.end, l.rc && 'rc=' + l.rc].filter(Boolean).join(' · ');
+                libs.appendChild(chip);
+            });
+
+            const errs = document.getElementById('cp-errlist');
+            if (d.recent_errors && d.recent_errors.length) { errs.textContent = d.recent_errors.join('\n'); errs.classList.remove('hidden'); }
+            else errs.classList.add('hidden');
+        }
+
+        async function setBWLimit(rate) {
+            rate = (rate || '').trim();
+            if (!rate) return;
+            try {
+                const res = await fetch('/copy_bwlimit', {method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({rate})});
+                const data = await res.json();
+                if (data.status === 'ok') { showToast('Límite de ancho de banda: ' + data.bwlimit + ' (se aplica en menos de un minuto)'); refreshCopyStatus(); }
+                else showToast(data.message || 'No se pudo aplicar', 'error');
+            } catch (err) { showToast('No se pudo aplicar', 'error'); }
+        }
 
         async function checkCredentials() {
             const phone = phoneInput.value.trim();

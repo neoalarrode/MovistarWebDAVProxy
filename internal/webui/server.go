@@ -45,6 +45,15 @@ type Server struct {
 	authCfg      config.AuthConfig
 	rateLimiter  *config.AuthRateLimiter
 	webLogin     http.Handler // vista de inicio de sesión de la web (modo web), bajo /web-login/
+	webStatus    func() map[string]interface{}
+
+	copyDir        string // COPY_STATUS_DIR: registros del script de copia (solo lectura)
+	copyControlDir string // COPY_CONTROL_DIR: órdenes para el script (límite de ancho de banda)
+}
+
+// SetWebSessionStatus publica en /web_session el estado de la sesión web (modo web).
+func (s *Server) SetWebSessionStatus(f func() map[string]interface{}) {
+	s.webStatus = f
 }
 
 // SetWebLogin publica en /web-login/ la vista remota para iniciar sesión en la web
@@ -73,6 +82,9 @@ func NewServerWithAuth(client *sapi.Client, webdavServer *webdav.Server, authCfg
 		loginState:   make(map[string]*pendingLogin),
 		authCfg:      authCfg,
 		rateLimiter:  config.NewAuthRateLimiter(10, time.Minute),
+
+		copyDir:        strings.TrimSpace(os.Getenv("COPY_STATUS_DIR")),
+		copyControlDir: strings.TrimSpace(os.Getenv("COPY_CONTROL_DIR")),
 	}
 
 	if client != nil {
@@ -122,6 +134,9 @@ func (s *Server) Routes() http.Handler {
 	if s.webLogin != nil {
 		mux.Handle("/web-login/", s.webLogin)
 	}
+	mux.HandleFunc("/web_session", s.handleWebSession)
+	mux.HandleFunc("/copy_status", s.handleCopyStatus)
+	mux.HandleFunc("/copy_bwlimit", s.handleCopyBWLimit)
 
 	return s.securityMiddleware(mux)
 }

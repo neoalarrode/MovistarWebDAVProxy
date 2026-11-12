@@ -182,6 +182,7 @@ func main() {
 	if webSess != nil {
 		view := webSess.LoginView()
 		uiServer.SetWebLogin(view.Handler("/web-login/"))
+		uiServer.SetWebSessionStatus(webSess.Status)
 	}
 	webPort := "5000"
 	if p := strings.TrimSpace(os.Getenv("PORT")); p != "" {

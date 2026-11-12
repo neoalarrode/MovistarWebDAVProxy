@@ -59,9 +59,10 @@ type Session struct {
 	cancel      context.CancelFunc
 	userAgent   string
 
-	stateMu   sync.RWMutex
-	loggedIn  bool
-	checkedAt time.Time
+	stateMu    sync.RWMutex
+	loggedIn   bool
+	checkedAt  time.Time
+	loginSince time.Time // desde cuándo está activa la sesión
 
 	calls chan struct{} // concurrencia de llamadas a SAPI (la web usa 2)
 }
@@ -254,6 +255,9 @@ func (s *Session) LoggedIn() bool {
 
 func (s *Session) setLoggedIn(v bool) {
 	s.stateMu.Lock()
+	if v && (!s.loggedIn || s.loginSince.IsZero()) {
+		s.loginSince = time.Now()
+	}
 	if s.loggedIn != v {
 		if v {
 			logger.Log("[WebSession] ✔ Sesión web de Movistar Cloud activa.")
@@ -264,6 +268,20 @@ func (s *Session) setLoggedIn(v bool) {
 	s.loggedIn = v
 	s.checkedAt = time.Now()
 	s.stateMu.Unlock()
+}
+
+// Status resume el estado de la sesión para el panel.
+func (s *Session) Status() map[string]interface{} {
+	s.stateMu.RLock()
+	defer s.stateMu.RUnlock()
+	out := map[string]interface{}{"logged_in": s.loggedIn}
+	if !s.checkedAt.IsZero() {
+		out["checked_at"] = s.checkedAt.Format(time.RFC3339)
+	}
+	if s.loggedIn && !s.loginSince.IsZero() {
+		out["since"] = s.loginSince.Format(time.RFC3339)
+	}
+	return out
 }
 
 // DeviceID es la huella que se envía en X-deviceid ("web-" + DeviceID).
