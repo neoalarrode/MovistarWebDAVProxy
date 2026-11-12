@@ -26,6 +26,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	goruntime "runtime"
 	"strings"
 	"sync"
 	"time"
@@ -115,6 +116,10 @@ func main() {
 	if !*login {
 		opts = append(opts, chromedp.Headless)
 	}
+	if goruntime.GOOS == "linux" {
+		// Misma clave de cifrado de cookies en todos los arranques (sin llavero en el servidor).
+		opts = append(opts, chromedp.Flag("password-store", "basic"))
+	}
 	if *noSandbox {
 		opts = append(opts, chromedp.NoSandbox)
 	}
@@ -134,6 +139,7 @@ func main() {
 
 	if *remoteLogin != "" {
 		runRemoteLogin(ctx, b, *remoteLogin, absProfile)
+		closeBrowser(ctx)
 		return
 	}
 
@@ -148,6 +154,7 @@ func main() {
 			r, err := b.sapi("GET", "/sapi/profile/role?action=get", nil)
 			if err == nil && r.Status == 200 {
 				log.Println("✔ Sesión iniciada. Perfil guardado en", absProfile)
+				closeBrowser(ctx)
 				return
 			}
 		}
@@ -378,6 +385,17 @@ func runRemoteLogin(ctx context.Context, b *browser, addr, profile string) {
 		}
 	}
 	log.Fatal("no se detectó la sesión a tiempo")
+}
+
+// closeBrowser cierra Chromium de forma ordenada y espera a que salga, para que
+// vuelque las cookies de sesión a disco (las escribe con retraso). Sin esto, al
+// terminar el proceso o el contenedor la sesión recién iniciada se pierde.
+func closeBrowser(ctx context.Context) {
+	tctx, cancel := context.WithTimeout(ctx, 20*time.Second)
+	defer cancel()
+	if err := chromedp.Cancel(tctx); err != nil {
+		log.Printf("aviso: cierre de Chromium: %v", err)
+	}
 }
 
 func must(what string, r sapiResp, err error) {
