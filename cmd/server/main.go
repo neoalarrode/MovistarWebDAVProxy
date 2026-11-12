@@ -54,7 +54,9 @@ func main() {
 	}
 
 	cfg := config.LoadAccountConfig("")
-	if cfg.DeviceID != "" {
+	if config.WebSessionEnabled() {
+		// El modo de autenticación se anuncia al iniciar la sesión web.
+	} else if cfg.DeviceID != "" {
 		logger.Log("[WebDAV] 💻 Modo Autenticación: CLIENTE OFICIAL WINDOWS (%s)", logger.Mask(cfg.DeviceID))
 	} else if cfg.RefreshToken != "" {
 		logger.Log("[WebDAV] 📱 Modo Autenticación: Tokens OAuth2 Activos")
