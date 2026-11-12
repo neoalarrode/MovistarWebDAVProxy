@@ -4,6 +4,7 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
 )
 
 func TestReadCopyStatus(t *testing.T) {
@@ -35,5 +36,23 @@ func TestReadCopyStatus(t *testing.T) {
 	}
 	if st.ErrorCount != 1 || st.BWLimit != "20M" {
 		t.Errorf("errores %d (esperado 1), límite %q (esperado 20M)", st.ErrorCount, st.BWLimit)
+	}
+}
+
+func TestReadTransfers(t *testing.T) {
+	dir := t.TempDir()
+	p := filepath.Join(dir, "stats.json")
+	body := `{"speed":44040192,"transferring":[{"name":"b.mkv","size":100,"bytes":50,"percentage":50,"speed":10,"speedAvg":8,"eta":5},{"name":"a.mkv","size":10,"bytes":1,"percentage":10,"speed":3,"eta":null}]}`
+	if err := os.WriteFile(p, []byte(body), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	tr, sp := readTransfers(p, time.Minute)
+	if len(tr) != 2 || tr[0].Name != "a.mkv" || tr[1].Speed != 8 || tr[0].ETA != nil || sp != 44040192 {
+		t.Fatalf("lectura incorrecta: %+v, velocidad %v", tr, sp)
+	}
+	old := time.Now().Add(-5 * time.Minute)
+	_ = os.Chtimes(p, old, old)
+	if tr, _ := readTransfers(p, time.Minute); tr != nil {
+		t.Fatalf("un volcado antiguo debe ignorarse, obtenido %+v", tr)
 	}
 }

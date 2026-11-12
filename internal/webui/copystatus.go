@@ -2,12 +2,15 @@ package webui
 
 import (
 	"bufio"
+	"encoding/json"
 	"io"
 	"net/http"
 	"os"
 	"path/filepath"
 	"regexp"
+	"sort"
 	"strings"
+	"time"
 )
 
 // Estado de la copia masiva a la nube que hace un script externo con rclone.
@@ -18,6 +21,8 @@ import (
 //	progress.log   "<fecha> START <biblioteca>" y "<fecha> END <biblioteca> rc=<código>"
 //	<biblioteca>.log  log de rclone con --stats-one-line
 //	STOP           motivo de una parada automática (si existe)
+//	stats.json     volcado de "rclone rc core/stats" de la copia (archivos subiéndose)
+//	mount-stats.json  ídem del rclone del montaje de Emby (archivos leyéndose)
 //	control/bwlimit   límite de ancho de banda pedido desde el panel ("off", "20M"...)
 
 type copyLibrary struct {
@@ -28,20 +33,72 @@ type copyLibrary struct {
 	Result string `json:"rc,omitempty"`
 }
 
+// copyTransfer es un archivo en curso según rclone (nombre legible, no cifrado).
+type copyTransfer struct {
+	Name       string  `json:"name"`
+	Size       int64   `json:"size"`
+	Bytes      int64   `json:"bytes"`
+	Percentage int     `json:"percentage"`
+	Speed      float64 `json:"speed"` // bytes/s
+	ETA        *int64  `json:"eta"`   // segundos, null si se desconoce
+}
+
 type copyStatus struct {
-	Enabled      bool          `json:"enabled"`
-	Libraries    []copyLibrary `json:"libraries"`
-	Current      string        `json:"current,omitempty"`
-	Transferred  string        `json:"transferred,omitempty"`
-	Total        string        `json:"total,omitempty"`
-	Percent      string        `json:"percent,omitempty"`
-	Speed        string        `json:"speed,omitempty"`
-	ETA          string        `json:"eta,omitempty"`
-	StatsAt      string        `json:"stats_at,omitempty"`
-	RecentErrors []string      `json:"recent_errors"`
-	ErrorCount   int           `json:"error_count"`
-	Stop         string        `json:"stop,omitempty"`
-	BWLimit      string        `json:"bwlimit"`
+	Enabled      bool           `json:"enabled"`
+	Libraries    []copyLibrary  `json:"libraries"`
+	Current      string         `json:"current,omitempty"`
+	Transferred  string         `json:"transferred,omitempty"`
+	Total        string         `json:"total,omitempty"`
+	Percent      string         `json:"percent,omitempty"`
+	Speed        string         `json:"speed,omitempty"`
+	ETA          string         `json:"eta,omitempty"`
+	StatsAt      string         `json:"stats_at,omitempty"`
+	RecentErrors []string       `json:"recent_errors"`
+	ErrorCount   int            `json:"error_count"`
+	Stop         string         `json:"stop,omitempty"`
+	BWLimit      string         `json:"bwlimit"`
+	Uploading    []copyTransfer `json:"uploading"`
+	Reading      []copyTransfer `json:"reading"`
+	UploadSpeed  float64        `json:"upload_speed"` // bytes/s según rclone en vivo
+	ReadSpeed    float64        `json:"read_speed"`
+}
+
+// readTransfers lee un volcado de "rclone rc core/stats". Si es de hace más de
+// staleAfter (rclone parado o el volcador caído), se ignora.
+func readTransfers(path string, staleAfter time.Duration) ([]copyTransfer, float64) {
+	fi, err := os.Stat(path)
+	if err != nil || time.Since(fi.ModTime()) > staleAfter {
+		return nil, 0
+	}
+	b, err := os.ReadFile(path)
+	if err != nil {
+		return nil, 0
+	}
+	var stats struct {
+		Speed        float64 `json:"speed"`
+		Transferring []struct {
+			Name       string  `json:"name"`
+			Size       int64   `json:"size"`
+			Bytes      int64   `json:"bytes"`
+			Percentage int     `json:"percentage"`
+			Speed      float64 `json:"speed"`
+			SpeedAvg   float64 `json:"speedAvg"`
+			ETA        *int64  `json:"eta"`
+		} `json:"transferring"`
+	}
+	if json.Unmarshal(b, &stats) != nil {
+		return nil, 0
+	}
+	out := make([]copyTransfer, 0, len(stats.Transferring))
+	for _, t := range stats.Transferring {
+		sp := t.SpeedAvg
+		if sp == 0 {
+			sp = t.Speed
+		}
+		out = append(out, copyTransfer{Name: t.Name, Size: t.Size, Bytes: t.Bytes, Percentage: t.Percentage, Speed: sp, ETA: t.ETA})
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].Name < out[j].Name })
+	return out, stats.Speed
 }
 
 var (
@@ -90,7 +147,7 @@ func tailLines(path string, max int64) []string {
 }
 
 func readCopyStatus(dir, controlDir string) copyStatus {
-	st := copyStatus{RecentErrors: []string{}, BWLimit: "off"}
+	st := copyStatus{RecentErrors: []string{}, BWLimit: "off", Uploading: []copyTransfer{}, Reading: []copyTransfer{}}
 	if dir == "" {
 		return st
 	}
@@ -167,6 +224,12 @@ func readCopyStatus(dir, controlDir string) copyStatus {
 		if st.Stop == "" {
 			st.Stop = "parada automática (sin motivo registrado)"
 		}
+	}
+	if up, sp := readTransfers(filepath.Join(dir, "stats.json"), 90*time.Second); up != nil {
+		st.Uploading, st.UploadSpeed = up, sp
+	}
+	if rd, sp := readTransfers(filepath.Join(dir, "mount-stats.json"), 90*time.Second); rd != nil {
+		st.Reading, st.ReadSpeed = rd, sp
 	}
 	if controlDir != "" {
 		if b, err := os.ReadFile(filepath.Join(controlDir, "bwlimit")); err == nil && strings.TrimSpace(string(b)) != "" {
