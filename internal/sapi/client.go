@@ -274,6 +274,8 @@ type Client struct {
 	// web, si no es nil, sustituye la autenticación del cliente de escritorio por
 	// la sesión de la web (ver EnableWebSession).
 	web WebSession
+	// freshURLs guarda, por ID, la última URL de descarga renovada en modo web.
+	freshURLs sync.Map
 
 	sapiSem        chan struct{}
 	pacingMu       sync.Mutex
@@ -1826,6 +1828,31 @@ func (c *Client) DownloadFileStream(item MediaItem) (io.ReadCloser, error) {
 }
 
 func (c *Client) DownloadFileStreamRange(item MediaItem, offset int64) (io.ReadCloser, error) {
+	if !c.WebMode() || item.ID == "" {
+		return c.downloadRange(item, offset)
+	}
+	// Modo web: las URL de descarga van firmadas y caducan. Se usa la última URL
+	// renovada de ese archivo y, si la descarga falla o llega vacía, se pide una URL
+	// nueva (como hace la web al abrir un archivo) y se reintenta una vez.
+	if u, ok := c.freshURLs.Load(item.ID); ok {
+		item.URL = u.(string)
+	}
+	rc, err := c.downloadRange(item, offset)
+	if err == nil {
+		return rc, nil
+	}
+	fresh, ferr := c.GetMediaByID(item.ID)
+	if ferr != nil || fresh == nil || fresh.URL == "" || fresh.URL == item.URL {
+		logger.Log("[SAPI] ⚠️ Descarga de '%s' (byte %d) fallida: %v; sin URL nueva disponible.", item.Name, offset, err)
+		return nil, err
+	}
+	logger.Log("[SAPI] 🔄 Descarga de '%s' (byte %d) fallida (%v); reintentando con URL de descarga renovada.", item.Name, offset, err)
+	c.freshURLs.Store(item.ID, fresh.URL)
+	item.URL = fresh.URL
+	return c.downloadRange(item, offset)
+}
+
+func (c *Client) downloadRange(item MediaItem, offset int64) (io.ReadCloser, error) {
 	dlURL := item.URL
 	if dlURL == "" && item.ID != "" {
 		dlURL = fmt.Sprintf("%s/media/content?id=%s", c.baseURL, item.ID)
@@ -1858,6 +1885,18 @@ func (c *Client) DownloadFileStreamRange(item MediaItem, offset int64) (io.ReadC
 	if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusPartialContent {
 		resp.Body.Close()
 		return nil, fmt.Errorf("download returned HTTP %d", resp.StatusCode)
+	}
+	if c.WebMode() {
+		// Un 200 a una petición con rango entregaría el archivo desde el principio
+		// (datos del sitio equivocado), y un cuerpo vacío no sirve para nada.
+		if offset > 0 && resp.StatusCode == http.StatusOK {
+			resp.Body.Close()
+			return nil, fmt.Errorf("download ignoró el rango (HTTP 200 a bytes=%d-)", offset)
+		}
+		if resp.ContentLength == 0 && item.Size > offset {
+			resp.Body.Close()
+			return nil, fmt.Errorf("download devolvió un cuerpo vacío (HTTP %d)", resp.StatusCode)
+		}
 	}
 
 	ct := strings.ToLower(resp.Header.Get("Content-Type"))
