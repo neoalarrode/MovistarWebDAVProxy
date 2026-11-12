@@ -82,7 +82,22 @@ func NewSession(opts Options) (*Session, error) {
 	if err := s.start(); err != nil {
 		return nil, err
 	}
+	go s.watchLogin()
 	return s, nil
+}
+
+// watchLogin comprueba la sesión cada pocos segundos mientras no esté iniciada,
+// para detectar enseguida que el usuario ha entrado desde la vista remota.
+func (s *Session) watchLogin() {
+	for {
+		time.Sleep(5 * time.Second)
+		if s.LoggedIn() {
+			continue
+		}
+		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		s.CheckLogin(ctx)
+		cancel()
+	}
 }
 
 func (s *Session) start() error {
