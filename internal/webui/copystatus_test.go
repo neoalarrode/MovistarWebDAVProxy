@@ -56,3 +56,26 @@ func TestReadTransfers(t *testing.T) {
 		t.Fatalf("un volcado antiguo debe ignorarse, obtenido %+v", tr)
 	}
 }
+
+// Tras un corte, el log y el volcado de la ejecución anterior no deben mezclarse.
+func TestReadCopyStatus_IgnoresPreviousRun(t *testing.T) {
+	dir := t.TempDir()
+	write := func(name, body string) {
+		if err := os.WriteFile(filepath.Join(dir, name), []byte(body), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	write("progress.log", "2026-11-12 22:43:38 INICIO Peliculas\n2026-11-12 23:23:23 FIN Peliculas rc=143\n2026-11-12 23:23:32 INICIO Peliculas\n")
+	write("Peliculas.log", "2026/11/12 23:22:00 INFO  :   25.660 GiB / 1.377 TiB, 2%, 32.000 MiB/s, ETA 9h\n2026/11/12 23:22:30 ERROR : x.mkv: corte\n")
+	write("stats.json", `{"speed":1,"transferring":[{"name":"viejo.mkv","size":1,"bytes":1,"percentage":1}]}`)
+	before, _ := time.ParseInLocation("2006-01-02 15:04:05", "2026-11-12 23:23:00", time.Local)
+	_ = os.Chtimes(filepath.Join(dir, "stats.json"), before, before)
+
+	st := readCopyStatus(dir, "")
+	if st.Transferred != "" || st.ErrorCount != 0 || len(st.Uploading) != 0 {
+		t.Fatalf("se mezclaron datos de la ejecución anterior: %+v", st)
+	}
+	if st.Current != "Peliculas" {
+		t.Fatalf("esperado Peliculas en curso, obtenido %q", st.Current)
+	}
+}

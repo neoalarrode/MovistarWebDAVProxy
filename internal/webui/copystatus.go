@@ -156,6 +156,7 @@ func readCopyStatus(dir, controlDir string) copyStatus {
 	}
 	st.Enabled = true
 
+	var runStart time.Time // inicio de la ejecución en curso: lo anterior es de otra ejecución
 	libs := map[string]*copyLibrary{}
 	var order []string
 	add := func(name string) *copyLibrary {
@@ -178,6 +179,7 @@ func readCopyStatus(dir, controlDir string) copyStatus {
 		if m[2] == "START" || m[2] == "INICIO" {
 			l.State, l.Start, l.End, l.Result = "running", m[1], "", ""
 			st.Current = l.Name
+			runStart = parseLocalTime(m[1])
 		} else {
 			l.End, l.Result = m[1], m[4]
 			if m[4] == "0" {
@@ -206,6 +208,13 @@ func readCopyStatus(dir, controlDir string) copyStatus {
 	}
 	if logLib != "" {
 		for _, line := range tailLines(filepath.Join(dir, logLib+".log"), 256<<10) {
+			// El log de cada biblioteca se reutiliza entre ejecuciones (tras un corte):
+			// solo cuenta lo escrito desde el último inicio.
+			if !runStart.IsZero() {
+				if ts := parseLocalTime(firstTwoFields(line)); !ts.IsZero() && ts.Before(runStart) {
+					continue
+				}
+			}
 			if m := statsLine.FindStringSubmatch(line); m != nil {
 				st.StatsAt, st.Transferred, st.Total, st.Percent, st.Speed, st.ETA = m[1], m[2], m[3], m[4], m[5], m[6]
 			}
@@ -225,7 +234,11 @@ func readCopyStatus(dir, controlDir string) copyStatus {
 			st.Stop = "parada automática (sin motivo registrado)"
 		}
 	}
-	if up, sp := readTransfers(filepath.Join(dir, "stats.json"), 90*time.Second); up != nil {
+	statsPath := filepath.Join(dir, "stats.json")
+	if fi, err := os.Stat(statsPath); err == nil && !runStart.IsZero() && fi.ModTime().Before(runStart) {
+		statsPath = "" // volcado de la ejecución anterior
+	}
+	if up, sp := readTransfers(statsPath, 90*time.Second); up != nil {
 		st.Uploading, st.UploadSpeed = up, sp
 	}
 	if rd, sp := readTransfers(filepath.Join(dir, "mount-stats.json"), 90*time.Second); rd != nil {
@@ -275,4 +288,23 @@ func (s *Server) handleWebSession(w http.ResponseWriter, r *http.Request) {
 	out := s.webStatus()
 	out["enabled"] = true
 	jsonResponse(w, http.StatusOK, out)
+}
+
+// parseLocalTime interpreta las fechas del script ("2026-11-12 22:43:38" o RFC 3339)
+// y de rclone ("2026/11/12 22:43:38") en hora local. Devuelve cero si no encaja.
+func parseLocalTime(v string) time.Time {
+	for _, layout := range []string{time.RFC3339, "2006-01-02 15:04:05", "2006/01/02 15:04:05"} {
+		if t, err := time.ParseInLocation(layout, strings.TrimSpace(v), time.Local); err == nil {
+			return t
+		}
+	}
+	return time.Time{}
+}
+
+func firstTwoFields(line string) string {
+	f := strings.Fields(line)
+	if len(f) < 2 {
+		return ""
+	}
+	return f[0] + " " + f[1]
 }
