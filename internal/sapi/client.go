@@ -353,6 +353,17 @@ func (c *Client) EnableWebSession(ws WebSession, rt http.RoundTripper) {
 	c.sessionExpired = false
 }
 
+// SetMaxConcurrentRequests fija cuántas peticiones a Movistar pueden estar en curso
+// a la vez. Una subida ocupa su hueco mientras envía el cuerpo (decenas de segundos
+// por GB), así que con un solo hueco bloquearía todas las lecturas. Debe llamarse
+// al arrancar, antes de servir peticiones.
+func (c *Client) SetMaxConcurrentRequests(n int) {
+	if n < 1 {
+		n = 1
+	}
+	c.sapiSem = make(chan struct{}, n)
+}
+
 // WebMode indica si el cliente usa la sesión de la web.
 func (c *Client) WebMode() bool {
 	c.mu.RLock()
