@@ -6,6 +6,7 @@
 // Uso:
 //
 //	webprobe -login          abre Chrome con ventana para iniciar sesión (una vez)
+//	webprobe -remote-login :8099   sin ventana: sirve una página web para iniciar sesión a distancia
 //	webprobe                 ejecuta las pruebas en modo headless con el perfil guardado
 package main
 
@@ -26,10 +27,13 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/chromedp/cdproto/network"
 	"github.com/chromedp/chromedp"
+
+	"movistar-webdav-proxy/internal/webclient"
 )
 
 const portal = "https://micloud.movistar.es"
@@ -83,6 +87,9 @@ func main() {
 	login := flag.Bool("login", false, "abrir Chrome con ventana para iniciar sesión")
 	profile := flag.String("profile", ".webprofile", "directorio del perfil de Chrome")
 	chunkName := flag.String("chunk", ".rclone_chunk.001_", "subcadena del archivo a usar en la prueba de descarga")
+	remoteLogin := flag.String("remote-login", "", "dirección donde servir la página de inicio de sesión remoto (p. ej. :8099)")
+	noSandbox := flag.Bool("no-sandbox", false, "lanzar Chromium sin sandbox (necesario como root en contenedores)")
+	chromePath := flag.String("chrome", "", "ruta del ejecutable de Chrome/Chromium (por defecto, autodetectar)")
 	flag.Parse()
 
 	if err := os.MkdirAll(*profile, 0o700); err != nil {
@@ -100,6 +107,12 @@ func main() {
 	if !*login {
 		opts = append(opts, chromedp.Headless)
 	}
+	if *noSandbox {
+		opts = append(opts, chromedp.NoSandbox)
+	}
+	if *chromePath != "" {
+		opts = append(opts, chromedp.ExecPath(*chromePath))
+	}
 	actx, cancel := chromedp.NewExecAllocator(context.Background(), opts...)
 	defer cancel()
 	ctx, cancel := chromedp.NewContext(actx)
@@ -109,6 +122,11 @@ func main() {
 
 	if err := chromedp.Do(ctx, chromedp.Navigate(portal+"/")); err != nil {
 		log.Fatalf("navegar: %v", err)
+	}
+
+	if *remoteLogin != "" {
+		runRemoteLogin(ctx, b, *remoteLogin, absProfile)
+		return
 	}
 
 	if *login {
@@ -310,6 +328,48 @@ func main() {
 		}
 	}
 	log.Printf("✔ Ráfaga: 40 listados en %s, %d fallos", time.Since(t0).Round(time.Millisecond), fails)
+}
+
+// runRemoteLogin sirve la vista de inicio de sesión hasta que SAPI reconoce la sesión.
+func runRemoteLogin(ctx context.Context, b *browser, addr, profile string) {
+	tok := make([]byte, 12)
+	_, _ = rand.Read(tok)
+	prefix := "/" + hex.EncodeToString(tok) + "/"
+
+	var mu sync.Mutex
+	logged := false
+	check := func() bool {
+		if _, err := chromedp.Run(ctx, chromedp.Evaluate[bool](sapiJS+";true")); err != nil {
+			return false
+		}
+		r, err := b.sapi("GET", "/sapi/profile/role?action=get", nil)
+		return err == nil && r.Status == 200
+	}
+
+	view := webclient.NewLoginView(ctx)
+	view.LoggedIn = func() bool { mu.Lock(); defer mu.Unlock(); return logged }
+	srv := &http.Server{Addr: addr, Handler: view.Handler(prefix)}
+	go func() {
+		if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+			log.Fatalf("servidor de login: %v", err)
+		}
+	}()
+	log.Printf("Abre http://<IP-del-servidor>%s%s para iniciar sesión (10 min)", addr, prefix)
+
+	deadline := time.Now().Add(10 * time.Minute)
+	for time.Now().Before(deadline) {
+		time.Sleep(5 * time.Second)
+		if check() {
+			mu.Lock()
+			logged = true
+			mu.Unlock()
+			log.Println("✔ Sesión iniciada. Perfil guardado en", profile)
+			time.Sleep(4 * time.Second) // que la página muestre el estado antes de cerrar
+			_ = srv.Close()
+			return
+		}
+	}
+	log.Fatal("no se detectó la sesión a tiempo")
 }
 
 func must(what string, r sapiResp, err error) {
