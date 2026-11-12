@@ -97,6 +97,14 @@ func main() {
 	}
 	absProfile, _ := filepath.Abs(*profile)
 
+	// Chromium deja SingletonLock/Cookie/Socket atados al hostname; en Docker cada
+	// contenedor tiene uno distinto y el perfil queda "en uso por otro ordenador".
+	// Solo hay una instancia por perfil, así que se limpian al arrancar.
+	stale, _ := filepath.Glob(filepath.Join(absProfile, "chrome", "Singleton*"))
+	for _, f := range stale {
+		_ = os.Remove(f)
+	}
+
 	opts := append([]chromedp.ExecAllocatorOption{},
 		chromedp.NoFirstRun,
 		chromedp.NoDefaultBrowserCheck,
