@@ -81,14 +81,14 @@ func TestGetProfileChanges_Success(t *testing.T) {
 	if capturedQuery["type"][0] != "picture,video,audio,file,folder" {
 		t.Errorf("expected type=picture,video,audio,file,folder, got %v", capturedQuery["type"])
 	}
-	if capturedQuery["responsetime"][0] != "true" {
-		t.Errorf("expected responsetime=true, got %v", capturedQuery["responsetime"])
-	}
 	if capturedQuery["sortby"][0] != "creationdate" {
 		t.Errorf("expected sortby=creationdate, got %v", capturedQuery["sortby"])
 	}
 	if capturedQuery["sortorder"][0] != "descending" {
 		t.Errorf("expected sortorder=descending, got %v", capturedQuery["sortorder"])
+	}
+	if capturedQuery["responsetime"][0] != "true" {
+		t.Errorf("expected responsetime=true, got %v", capturedQuery["responsetime"])
 	}
 	if capturedQuery["locked"][0] != "true" {
 		t.Errorf("expected locked=true, got %v", capturedQuery["locked"])

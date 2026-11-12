@@ -12,6 +12,7 @@ import (
 	"syscall"
 	"time"
 
+	"movistar-webdav-proxy/internal/auth"
 	"movistar-webdav-proxy/internal/cache"
 	"movistar-webdav-proxy/internal/config"
 	"movistar-webdav-proxy/internal/logger"
@@ -86,7 +87,9 @@ func main() {
 			os.Exit(1)
 		}
 		defer webSess.Close()
-		client.EnableWebSession(webSess, &webclient.Transport{Session: webSess, Base: webclient.NewDirectTransport()})
+		// Descargas firmadas y subidas directas con la huella TLS de Chrome (uTLS), a juego
+		// con el User-Agent del Chromium de la sesión.
+		client.EnableWebSession(webSess, &webclient.Transport{Session: webSess, Base: auth.NewFingerprintedTransport()})
 		logger.Log("[WebDAV] 🌐 Modo Autenticación: SESIÓN WEB (navegador)")
 		checkCtx, checkCancel := context.WithTimeout(context.Background(), 45*time.Second)
 		if !webSess.CheckLogin(checkCtx) {
