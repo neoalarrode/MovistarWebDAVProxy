@@ -1264,11 +1264,21 @@ func (mfs *MovistarFS) OpenFile(ctx context.Context, name string, flag int, perm
 			ID:               mem.ID,
 			Name:             mem.Name,
 			Size:             mem.Size,
-			URL:              mem.downloadURL(mfs),
+			URL:              mem.URL,
 			FolderID:         mem.FolderID,
 			ModificationDate: sapi.FlexDate(mem.ModTime.UTC().Format("20060102T150405Z")),
 		}
-		return NewWebDAVFileReader(mfs, cleanPath, item), nil
+		if !mfs.client.WebMode() {
+			item.URL = mem.downloadURL(mfs)
+			return NewWebDAVFileReader(mfs, cleanPath, item), nil
+		}
+		// Modo web: la subida no devuelve URL de descarga y la URL por defecto nunca
+		// sirve, así que hay que esperar a que SAPI indexe el archivo (unos segundos).
+		// Se espera en la primera lectura, no aquí, para no frenar los PROPFIND (que
+		// también abren el archivo).
+		r := NewWebDAVFileReader(mfs, cleanPath, item)
+		r.resolveURL = func() string { return mfs.waitForDownloadURL(mem) }
+		return r, nil
 	}
 	mfs.cacheMu.RUnlock()
 
@@ -2227,13 +2237,14 @@ func (noopDeadProps) Patch(patches []webdav.Proppatch) ([]webdav.Propstat, error
 
 type WebDAVFileReader struct {
 	noopDeadProps
-	mfs      *MovistarFS
-	path     string
-	item     sapi.MediaItem
-	pos      int64
-	stream   io.ReadCloser
-	cacheBuf *bytes.Buffer
-	streamMu sync.Mutex
+	mfs        *MovistarFS
+	path       string
+	item       sapi.MediaItem
+	pos        int64
+	stream     io.ReadCloser
+	cacheBuf   *bytes.Buffer
+	streamMu   sync.Mutex
+	resolveURL func() string // si no es nil, obtiene la URL de descarga antes de la primera lectura
 }
 
 func NewWebDAVFileReader(mfs *MovistarFS, path string, item sapi.MediaItem) *WebDAVFileReader {
@@ -2251,6 +2262,15 @@ func (r *WebDAVFileReader) Read(p []byte) (n int, err error) {
 	r.streamMu.Unlock()
 
 	if st == nil {
+		r.streamMu.Lock()
+		resolve := r.resolveURL
+		r.resolveURL = nil
+		r.streamMu.Unlock()
+		if resolve != nil {
+			if u := resolve(); u != "" {
+				r.item.URL = u
+			}
+		}
 		sizeMB := float64(r.item.Size) / (1024 * 1024)
 		if pos > 0 {
 			logger.Log("[WebDAV] ⬇ Descargando rango [byte %d..] de '%s' (%.2f MB)...", pos, r.item.Name, sizeMB)

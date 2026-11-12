@@ -43,6 +43,13 @@ type Server struct {
 	loginState   map[string]*pendingLogin
 	authCfg      config.AuthConfig
 	rateLimiter  *config.AuthRateLimiter
+	webLogin     http.Handler // vista de inicio de sesión de la web (modo web), bajo /web-login/
+}
+
+// SetWebLogin publica en /web-login/ la vista remota para iniciar sesión en la web
+// de Movistar Cloud (modo web). Queda detrás de la autenticación del panel.
+func (s *Server) SetWebLogin(h http.Handler) {
+	s.webLogin = h
 }
 
 type pendingLogin struct {
@@ -109,6 +116,9 @@ func (s *Server) Routes() http.Handler {
 	mux.HandleFunc("/unlink", s.handleUnlink)
 	mux.HandleFunc("/test_telegram", s.handleTestTelegram)
 	mux.HandleFunc("/save_telegram", s.handleSaveTelegram)
+	if s.webLogin != nil {
+		mux.Handle("/web-login/", s.webLogin)
+	}
 
 	return s.securityMiddleware(mux)
 }

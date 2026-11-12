@@ -3,6 +3,7 @@ package sapi
 import (
 	"bufio"
 	"bytes"
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -271,6 +272,10 @@ type Client struct {
 	sessionExpired   bool
 	OnSessionExpired func(err error)
 
+	// web, si no es nil, sustituye la autenticación del cliente de escritorio por
+	// la sesión de la web (ver EnableWebSession).
+	web WebSession
+
 	sapiSem        chan struct{}
 	pacingMu       sync.Mutex
 	lastReqTime    time.Time
@@ -339,6 +344,31 @@ func NewClient(cfg config.AccountConfig) (*Client, error) {
 	return c, nil
 }
 
+// WebSession es la sesión de la web oficial que usa el modo web (webclient.Session).
+type WebSession interface {
+	CheckLogin(ctx context.Context) bool
+	LoggedIn() bool
+}
+
+// EnableWebSession hace que el cliente hable con Movistar Cloud como la web:
+// todas las peticiones pasan por rt (webclient.Transport) y la validez de la
+// sesión la decide ws en lugar de los tokens OAuth del cliente de escritorio.
+func (c *Client) EnableWebSession(ws WebSession, rt http.RoundTripper) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.web = ws
+	c.httpClient.Transport = rt
+	c.httpClient.Jar = nil
+	c.sessionExpired = false
+}
+
+// WebMode indica si el cliente usa la sesión de la web.
+func (c *Client) WebMode() bool {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	return c.web != nil
+}
+
 func (c *Client) syncCookiesLocked() {
 	if c.httpClient == nil || c.httpClient.Jar == nil {
 		return
@@ -394,6 +424,9 @@ func (c *Client) SetConfig(cfg config.AccountConfig) {
 func (c *Client) IsSessionExpired() bool {
 	c.mu.RLock()
 	defer c.mu.RUnlock()
+	if c.web != nil {
+		return !c.web.LoggedIn()
+	}
 	return c.sessionExpired
 }
 
@@ -411,6 +444,9 @@ func (c *Client) SetBaseURLs(baseURL, uploadURL string) {
 func (c *Client) HasCredentials() bool {
 	c.mu.RLock()
 	defer c.mu.RUnlock()
+	if c.web != nil {
+		return c.web.LoggedIn()
+	}
 	return c.cfg.RefreshToken != "" || c.cfg.AccessToken != "" || (c.cfg.JSessionID != "" && c.cfg.ValidationKey != "")
 }
 
@@ -436,6 +472,10 @@ func (c *Client) appendValidationKey(rawURL string) string {
 
 func (c *Client) processSAPIResponse(resp *http.Response) {
 	if resp == nil || resp.StatusCode >= 400 {
+		return
+	}
+	if c.WebMode() {
+		// En modo web las credenciales viven en el navegador; no hay tokens que rotar.
 		return
 	}
 
@@ -490,6 +530,17 @@ func (c *Client) processSAPIResponse(resp *http.Response) {
 func (c *Client) RefreshSession() bool {
 	c.refreshMu.Lock()
 	defer c.refreshMu.Unlock()
+
+	c.mu.RLock()
+	ws := c.web
+	c.mu.RUnlock()
+	if ws != nil {
+		// No hay OAuth que renovar: solo se comprueba si la sesión de la web sigue viva.
+		// Si caducó, hay que volver a iniciarla desde el panel.
+		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		defer cancel()
+		return ws.CheckLogin(ctx)
+	}
 
 	c.mu.RLock()
 	cfg := c.cfg

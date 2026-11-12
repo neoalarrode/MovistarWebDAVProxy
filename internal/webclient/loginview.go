@@ -17,13 +17,14 @@ import (
 // pantalla y le reenvía clics, texto y teclas, para que el usuario inicie sesión
 // en Movistar desde cualquier navegador sin entorno gráfico en el servidor.
 type LoginView struct {
-	ctx      context.Context // contexto chromedp de la pestaña
-	LoggedIn func() bool     // opcional: estado de la sesión para mostrarlo en la página
-	mu       sync.Mutex      // serializa la entrada para no mezclar eventos
+	tab      func() (context.Context, error) // pestaña chromedp actual
+	LoggedIn func() bool                     // opcional: estado de la sesión para mostrarlo en la página
+	mu       sync.Mutex                      // serializa la entrada para no mezclar eventos
 }
 
+// NewLoginView crea la vista sobre una pestaña fija.
 func NewLoginView(tabCtx context.Context) *LoginView {
-	return &LoginView{ctx: tabCtx}
+	return &LoginView{tab: func() (context.Context, error) { return tabCtx, nil }}
 }
 
 // Handler devuelve las rutas de la vista bajo el prefijo dado (p. ej. "/login/").
@@ -37,8 +38,13 @@ func (v *LoginView) Handler(prefix string) http.Handler {
 }
 
 func (v *LoginView) serveScreen(w http.ResponseWriter, r *http.Request) {
+	tab, err := v.tab()
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusBadGateway)
+		return
+	}
 	q := int64(60)
-	res, err := chromedp.Call(v.ctx, page.CaptureScreenshot, page.CaptureScreenshotParams{
+	res, err := chromedp.Call(tab, page.CaptureScreenshot, page.CaptureScreenshotParams{
 		Format:  page.CaptureScreenshotFormatJpeg,
 		Quality: &q,
 	})
@@ -76,22 +82,26 @@ func (v *LoginView) serveInput(w http.ResponseWriter, r *http.Request) {
 	v.mu.Lock()
 	defer v.mu.Unlock()
 
-	var err error
+	tab, err := v.tab()
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusBadGateway)
+		return
+	}
 	switch ev.Kind {
 	case "click":
 		for _, t := range []input.DispatchMouseEventType{input.DispatchMouseEventTypeMousePressed, input.DispatchMouseEventTypeMouseReleased} {
-			if _, err = chromedp.Call(v.ctx, input.DispatchMouseEvent, input.DispatchMouseEventParams{
+			if _, err = chromedp.Call(tab, input.DispatchMouseEvent, input.DispatchMouseEventParams{
 				Type: t, X: ev.X, Y: ev.Y, Button: input.MouseButtonLeft, Buttons: 1, ClickCount: 1,
 			}); err != nil {
 				break
 			}
 		}
 	case "wheel":
-		_, err = chromedp.Call(v.ctx, input.DispatchMouseEvent, input.DispatchMouseEventParams{
+		_, err = chromedp.Call(tab, input.DispatchMouseEvent, input.DispatchMouseEventParams{
 			Type: input.DispatchMouseEventTypeMouseWheel, X: ev.X, Y: ev.Y, DeltaY: ev.DY,
 		})
 	case "text":
-		_, err = chromedp.Call(v.ctx, input.InsertText, input.InsertTextParams{Text: ev.Text})
+		_, err = chromedp.Call(tab, input.InsertText, input.InsertTextParams{Text: ev.Text})
 	case "key":
 		code, ok := specialKeys[ev.Key]
 		if !ok {
@@ -102,10 +112,10 @@ func (v *LoginView) serveInput(w http.ResponseWriter, r *http.Request) {
 		if ev.Key == "Enter" {
 			text = "\r"
 		}
-		if _, err = chromedp.Call(v.ctx, input.DispatchKeyEvent, input.DispatchKeyEventParams{
+		if _, err = chromedp.Call(tab, input.DispatchKeyEvent, input.DispatchKeyEventParams{
 			Type: input.DispatchKeyEventTypeKeyDown, Key: ev.Key, Code: ev.Key, Text: text, WindowsVirtualKeyCode: code,
 		}); err == nil {
-			_, err = chromedp.Call(v.ctx, input.DispatchKeyEvent, input.DispatchKeyEventParams{
+			_, err = chromedp.Call(tab, input.DispatchKeyEvent, input.DispatchKeyEventParams{
 				Type: input.DispatchKeyEventTypeKeyUp, Key: ev.Key, Code: ev.Key, WindowsVirtualKeyCode: code,
 			})
 		}

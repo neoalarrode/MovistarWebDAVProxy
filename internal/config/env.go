@@ -61,6 +61,12 @@ type AccountConfig struct {
 	TelegramChatID   string `json:"telegram_chat_id"`
 }
 
+// WebSessionEnabled indica si se usa el modo web (WEB_SESSION=true): acceso a
+// Movistar Cloud con una sesión de la web oficial en un Chromium sin pantalla.
+func WebSessionEnabled() bool {
+	return strings.EqualFold(strings.TrimSpace(os.Getenv("WEB_SESSION")), "true")
+}
+
 // GetSyncInterval returns the metadata delta sync interval configured via SYNC_INTERVAL_SEC.
 // Default: 60s, minimum: 15s.
 func GetSyncInterval() time.Duration {
