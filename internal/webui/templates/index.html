@@ -49,6 +49,8 @@
         html.dark .bg-rose-100, html.dark .hover\:bg-rose-100:hover { background-color: rgba(244,63,94,.22); }
         html.dark .bg-sky-50 { background-color: rgba(14,165,233,.12); }
         html.dark .bg-amber-50 { background-color: rgba(245,158,11,.12); }
+        html.dark .ring-offset-1 { --tw-ring-offset-color: #141b2a; }
+        html.dark .text-amber-800 { color: #fcd34d; }
         html.dark .border-amber-300 { border-color: rgba(251,191,36,.4); }
         html.dark .bg-sky-100 { background-color: rgba(14,165,233,.22); }
 
@@ -225,19 +227,14 @@
             <h3 class="text-xs font-semibold text-slate-500 uppercase tracking-wide mb-2">⬇ Leyendo ahora</h3>
             <div id="cp-rd" class="space-y-2"></div>
         </div>
-        <div id="cp-folders-box" class="hidden mb-4">
-            <div class="flex flex-wrap items-center justify-between gap-2 mb-2">
-                <h3 class="text-xs font-semibold text-slate-500 uppercase tracking-wide">Carpetas</h3>
-                <div class="flex flex-wrap gap-3 text-[11px] text-slate-500">
-                    <span><span class="inline-block w-2.5 h-2.5 rounded-full bg-slate-400 mr-1"></span>sin actividad</span>
-                    <span><span class="inline-block w-2.5 h-2.5 rounded-full bg-blue-500 mr-1"></span>subiendo</span>
-                    <span><span class="inline-block w-2.5 h-2.5 rounded-full bg-emerald-500 mr-1"></span>bajando</span>
-                    <span><span class="inline-block w-2.5 h-2.5 rounded-full bg-amber-500 mr-1"></span>en caché</span>
-                </div>
-            </div>
-            <div id="cp-folders" class="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-2"></div>
+        <div id="cp-legend" class="hidden flex flex-wrap gap-3 text-[11px] text-slate-500 mb-1.5">
+            <span><span class="inline-block w-2 h-2 rounded-full bg-slate-400 mr-1"></span>sin actividad</span>
+            <span><span class="inline-block w-2 h-2 rounded-full bg-blue-500 mr-1"></span>subiendo</span>
+            <span><span class="inline-block w-2 h-2 rounded-full bg-emerald-500 mr-1"></span>bajando</span>
+            <span><span class="inline-block w-2 h-2 rounded-full bg-amber-500 mr-1"></span>en caché</span>
         </div>
         <div id="cp-libs" class="flex flex-wrap gap-1.5 mb-4"></div>
+        <div id="cp-detail" class="hidden mb-4 rounded-xl border border-slate-200 bg-slate-50 p-4 text-xs"></div>
         <pre id="cp-errlist" class="hidden text-[11px] font-mono bg-slate-50 border border-slate-200 rounded-xl p-3 mb-4 overflow-x-auto whitespace-pre-wrap text-rose-700"></pre>
         <div class="flex flex-wrap items-center gap-2 pt-4 border-t border-slate-100 text-sm">
             <span class="text-slate-600">Límite de ancho de banda: <span id="cp-bw" class="font-mono font-semibold">off</span></span>
@@ -551,12 +548,10 @@
             document.getElementById('cp-updated').textContent = d.stats_at ? 'Actualizado: ' + d.stats_at : '-';
             document.getElementById('cp-bw').textContent = d.bwlimit || 'off';
 
-            renderFolders(d.folders || []);
-
             const libs = document.getElementById('cp-libs');
             libs.replaceChildren();
-            if (d.folders && d.folders.length) { libs.classList.add('hidden'); } else { libs.classList.remove('hidden'); }
-            (d.libraries || []).forEach(l => {
+            renderFolders(d.folders || [], libs);
+            if (!(d.folders && d.folders.length)) (d.libraries || []).forEach(l => {
                 const [icon, cls] = libStyle[l.state] || libStyle.pending;
                 const chip = document.createElement('span');
                 chip.className = 'px-2.5 py-1 rounded-full text-xs font-semibold border ' + cls;
@@ -614,52 +609,111 @@
             });
         }
 
-        const folderActivity = {
-            idle:     {bar: 'bg-slate-400',   box: 'bg-slate-50 border-slate-200',  label: 'Sin actividad'},
-            upload:   {bar: 'bg-blue-500',    box: 'bg-blue-50 border-blue-300',     label: 'Subiendo'},
-            download: {bar: 'bg-emerald-500', box: 'bg-emerald-50 border-emerald-200', label: 'Bajando'},
-            cache:    {bar: 'bg-amber-500',   box: 'bg-amber-50 border-amber-300',   label: 'En caché'},
+        // Etiquetas de carpeta: el icono es el estado de la copia y el color, la actividad en vivo.
+        const folderChip = {
+            idle:     'bg-slate-50 text-slate-600 border-slate-200',
+            upload:   'bg-blue-50 text-blue-800 border-blue-300',
+            download: 'bg-emerald-50 text-emerald-800 border-emerald-200',
+            cache:    'bg-amber-50 text-amber-800 border-amber-300',
         };
-        const folderCopy = {
-            done: '✔ Copiada', done_warn: '⚠ Copiada', running: '⏳ Copiando', failed: '✘ Con errores',
-            pending: '· Pendiente', excluded: '— Fuera de la copia', none: '',
+        const folderIcon = {done: '✔', done_warn: '⚠', running: '⏳', failed: '✘', pending: '·', excluded: '—', none: '·'};
+        const folderCopyText = {
+            done: 'Copiada', done_warn: 'Copiada con archivos dañados en origen', running: 'Copiando', failed: 'Con errores',
+            pending: 'Pendiente de copiar', excluded: 'Fuera de la copia', none: '',
         };
-        function renderFolders(folders) {
-            const box = document.getElementById('cp-folders-box'), grid = document.getElementById('cp-folders');
-            grid.replaceChildren();
-            if (!folders.length) { box.classList.add('hidden'); return; }
+        const activityText = {idle: 'Sin actividad', upload: 'Subiendo', download: 'Bajando', cache: 'En caché'};
+        // #carpeta=<nombre> en la URL abre directamente el detalle de esa carpeta.
+        let selectedFolder = (location.hash.match(/^#carpeta=(.+)$/) || [])[1] ? decodeURIComponent(location.hash.slice(9)) : null;
+        let lastFolders = [];
+        function el(tag, cls, text) {
+            const e = document.createElement(tag);
+            if (cls) e.className = cls;
+            if (text !== undefined) e.textContent = text;
+            return e;
+        }
+        function renderFolderDetail() {
+            const box = document.getElementById('cp-detail');
+            const f = lastFolders.find(x => x.name === selectedFolder);
+            box.replaceChildren();
+            if (!f) { box.classList.add('hidden'); return; }
             box.classList.remove('hidden');
+
+            const head = el('div', 'flex flex-wrap items-center justify-between gap-2 mb-2');
+            head.append(el('span', 'text-sm font-semibold text-slate-800', f.name));
+            const close = el('button', 'px-2 py-0.5 rounded-lg text-slate-500 hover:bg-slate-200', '✕');
+            close.title = 'Cerrar';
+            close.onclick = () => { selectedFolder = null; renderFolderDetail(); };
+            head.append(close);
+            box.append(head);
+
+            // Descripción en palabras de lo que pasa en la carpeta.
+            const parts = [];
+            const n = (k, s, p) => `${k} ${k === 1 ? s : p}`;
+            if (f.uploads) parts.push(`subiendo ${n(f.uploads, 'archivo', 'archivos')}`);
+            if (f.reads) parts.push(`leyendo ${n(f.reads, 'archivo', 'archivos')} (reproducción o análisis de Emby)`);
+            if (f.cached) parts.push(`${n(f.cached, 'archivo espera', 'archivos esperan')} en la caché para subirse`);
+            const activity = parts.length ? 'Ahora mismo está ' + parts.join(', ') + '.' : 'Ahora mismo no hay actividad en esta carpeta.';
+            const copyDesc = {
+                done: 'La copia a la nube está terminada.',
+                done_warn: `La copia está terminada salvo ${n(f.damaged, 'archivo que no se pudo leer', 'archivos que no se pudieron leer')} del disco de origen.`,
+                running: 'La copia a la nube está en curso.',
+                failed: 'La copia terminó con errores: revisa el registro.',
+                pending: 'Está en la cola de copia; todavía no ha empezado.',
+                excluded: 'No está prevista en la copia a la nube.',
+                none: '',
+            }[f.copy] || '';
+            const cloudDesc = f.in_cloud ? 'Ya existe en la nube: Emby lee de allí lo que está subido.' : 'Aún no existe en la nube: Emby la lee del NAS.';
+            [activity, copyDesc, cloudDesc].filter(Boolean).forEach(t => box.append(el('p', 'text-slate-600 mb-1', t)));
+
+            if (f.files && f.files.length) {
+                box.append(el('h4', 'mt-3 mb-1.5 font-semibold text-slate-500 uppercase tracking-wide text-[11px]', 'Archivos en curso'));
+                const kinds = {upload: ['⬆', 'bg-blue-500'], download: ['⬇', 'bg-emerald-500'], cache: ['⏸', 'bg-amber-500']};
+                f.files.forEach(t => {
+                    const [icon, color] = kinds[t.kind] || kinds.upload;
+                    const row = el('div', 'mb-2');
+                    const top = el('div', 'flex justify-between gap-3 mb-1');
+                    const nm = el('span', 'font-medium text-slate-800 truncate', icon + ' ' + t.name);
+                    nm.title = t.name;
+                    const info = t.kind === 'cache' ? 'esperando para subir' : `${t.percentage}% · ${fmtBytes(t.speed)}/s · ${fmtETA(t.eta)}`;
+                    top.append(nm, el('span', 'font-mono text-slate-500 whitespace-nowrap', info));
+                    const bar = el('div', 'w-full h-1.5 bg-slate-100 rounded-full overflow-hidden');
+                    const fill = el('div', 'h-full ' + color);
+                    fill.style.width = (t.kind === 'cache' ? 100 : Math.min(100, Math.max(0, t.percentage))) + '%';
+                    if (t.kind === 'cache') fill.style.opacity = '0.35';
+                    bar.append(fill);
+                    row.append(top, bar);
+                    box.append(row);
+                });
+            }
+            if (f.damaged_files && f.damaged_files.length) {
+                box.append(el('h4', 'mt-3 mb-1.5 font-semibold text-slate-500 uppercase tracking-wide text-[11px]', 'Dañados en origen (se intentarán rescatar al final)'));
+                const ul = el('ul', 'list-disc pl-5 text-rose-700 space-y-0.5');
+                f.damaged_files.forEach(d => ul.append(el('li', 'break-all', d)));
+                box.append(ul);
+            }
+        }
+
+        function renderFolders(folders, libs) {
+            lastFolders = folders;
+            document.getElementById('cp-legend').classList.toggle('hidden', !folders.length);
             folders.forEach(f => {
-                const a = folderActivity[f.activity] || folderActivity.idle;
-                const card = document.createElement('div');
-                card.className = 'relative overflow-hidden rounded-xl border pl-4 pr-3 py-2.5 text-xs ' + a.box;
-                const bar = document.createElement('div');
-                bar.className = 'absolute left-0 top-0 bottom-0 w-1.5 ' + a.bar;
-                const top = document.createElement('div');
-                top.className = 'flex justify-between gap-2';
-                const name = document.createElement('span');
-                name.className = 'font-semibold text-slate-800 truncate';
-                name.textContent = f.name;
-                name.title = f.name + (f.in_cloud ? ' (en la nube)' : ' (aún no está en la nube)');
-                const act = document.createElement('span');
-                act.className = 'font-semibold text-slate-600 whitespace-nowrap';
+                const chip = document.createElement('button');
+                chip.type = 'button';
+                const sel = f.name === selectedFolder ? ' ring-2 ring-offset-1 ring-blue-400' : '';
+                chip.className = 'px-2.5 py-1 rounded-full text-xs font-semibold border cursor-pointer transition hover:brightness-95' + sel + ' ' + (folderChip[f.activity] || folderChip.idle);
+                chip.onclick = () => { selectedFolder = selectedFolder === f.name ? null : f.name; refreshCopyStatus(); };
                 const counts = [];
                 if (f.uploads) counts.push('⬆' + f.uploads);
                 if (f.reads) counts.push('⬇' + f.reads);
                 if (f.cached) counts.push('⏸' + f.cached);
-                act.textContent = a.label + (counts.length ? ' ' + counts.join(' ') : '');
-                top.append(name, act);
-                const sub = document.createElement('div');
-                sub.className = 'mt-1 text-slate-500 flex justify-between gap-2';
-                const cp = document.createElement('span');
-                cp.textContent = folderCopy[f.copy] || '';
-                if (f.copy === 'done_warn') cp.textContent += ` (${f.damaged} dañado${f.damaged === 1 ? '' : 's'} en origen)`;
-                const cloud = document.createElement('span');
-                cloud.textContent = f.in_cloud ? '☁ en la nube' : '';
-                sub.append(cp, cloud);
-                card.append(bar, top, sub);
-                grid.appendChild(card);
+                chip.textContent = (folderIcon[f.copy] || '·') + ' ' + f.name + (counts.length ? ' ' + counts.join(' ') : '');
+                const tip = [activityText[f.activity] || '', folderCopyText[f.copy] || ''];
+                if (f.damaged) tip.push(f.damaged + ' dañado(s) en origen');
+                tip.push(f.in_cloud ? 'En la nube' : 'Aún no está en la nube');
+                chip.title = tip.filter(Boolean).join(' · ');
+                libs.appendChild(chip);
             });
+            renderFolderDetail();
         }
 
         async function setBWLimit(rate) {

@@ -26,6 +26,18 @@ type folderStatus struct {
 	Reads    int    `json:"reads"`
 	Cached   int    `json:"cached"`
 	Activity string `json:"activity"` // upload | download | cache | idle
+
+	Files        []folderFile `json:"files"`         // archivos en curso en esta carpeta
+	DamagedFiles []string     `json:"damaged_files"` // ilegibles en el NAS (máx. 50)
+}
+
+// folderFile es un archivo en curso dentro de una carpeta (ruta relativa a ella).
+type folderFile struct {
+	Name       string  `json:"name"`
+	Kind       string  `json:"kind"` // upload | download | cache
+	Percentage int     `json:"percentage"`
+	Speed      float64 `json:"speed"`
+	ETA        *int64  `json:"eta"`
 }
 
 type vfsQueueItem struct {
@@ -64,7 +76,7 @@ func buildFolders(dir string, st copyStatus, copyUploads int) []folderStatus {
 		if f, ok := byName[name]; ok {
 			return f
 		}
-		byName[name] = &folderStatus{Name: name, Copy: "none"}
+		byName[name] = &folderStatus{Name: name, Copy: "none", Files: []folderFile{}, DamagedFiles: []string{}}
 		order = append(order, name)
 		return byName[name]
 	}
@@ -94,8 +106,12 @@ func buildFolders(dir string, st copyStatus, copyUploads int) []folderStatus {
 		f.Copy = l.State
 	}
 	for _, line := range readLines(filepath.Join(dir, "origen-danado.txt")) {
-		if name := strings.SplitN(line, "\t", 2)[0]; byName[name] != nil {
-			byName[name].Damaged++
+		parts := strings.SplitN(line, "\t", 3)
+		if f := byName[parts[0]]; f != nil {
+			f.Damaged++
+			if len(parts) > 1 && len(f.DamagedFiles) < 50 {
+				f.DamagedFiles = append(f.DamagedFiles, parts[1])
+			}
 		}
 	}
 	for _, f := range byName {
@@ -106,23 +122,33 @@ func buildFolders(dir string, st copyStatus, copyUploads int) []folderStatus {
 	}
 
 	// Actividad en vivo.
-	if st.Current != "" && byName[st.Current] != nil {
-		byName[st.Current].Uploads += copyUploads // la copia sube desde la raíz de la carpeta
+	addFile := func(f *folderStatus, t copyTransfer, name, kind string) {
+		f.Files = append(f.Files, folderFile{Name: name, Kind: kind, Percentage: t.Percentage, Speed: t.Speed, ETA: t.ETA})
+	}
+	// Las primeras copyUploads subidas son de la copia, con rutas relativas a la
+	// carpeta en curso; el resto, del montaje, con la carpeta como primer componente.
+	if cur := byName[st.Current]; cur != nil {
+		for _, t := range st.Uploading[:copyUploads] {
+			cur.Uploads++
+			addFile(cur, t, t.Name, "upload")
+		}
+	}
+	for _, t := range st.Uploading[copyUploads:] {
+		if f := byName[topFolder(t.Name)]; f != nil {
+			f.Uploads++
+			addFile(f, t, strings.TrimPrefix(t.Name, f.Name+"/"), "upload")
+		}
 	}
 	for _, q := range readVFSQueue(dir) {
-		f := byName[topFolder(q.Name)]
-		if f == nil {
-			continue
-		}
-		if q.Uploading {
-			f.Uploads++
-		} else {
+		if f := byName[topFolder(q.Name)]; f != nil && !q.Uploading {
 			f.Cached++
+			addFile(f, copyTransfer{}, strings.TrimPrefix(q.Name, f.Name+"/"), "cache")
 		}
 	}
 	for _, r := range st.Reading {
 		if f := byName[topFolder(r.Name)]; f != nil {
 			f.Reads++
+			addFile(f, r, strings.TrimPrefix(r.Name, f.Name+"/"), "download")
 		}
 	}
 
