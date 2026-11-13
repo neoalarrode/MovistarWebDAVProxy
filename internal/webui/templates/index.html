@@ -497,13 +497,7 @@
                 }
             } catch (err) {}
             refreshCopyStatus();
-            // Cada 2 s mientras la pestaña está visible; en segundo plano, cada 30 s.
-            let copyTimer = setInterval(refreshCopyStatus, 2000);
-            document.addEventListener('visibilitychange', () => {
-                clearInterval(copyTimer);
-                copyTimer = setInterval(refreshCopyStatus, document.hidden ? 30000 : 2000);
-                if (!document.hidden) refreshCopyStatus();
-            });
+            startCopyEvents();
         }
 
         async function refreshWebSession() {
@@ -556,6 +550,26 @@
         async function refreshCopyStatus() {
             let d;
             try { d = await (await fetch('/copy_status')).json(); } catch (err) { return; }
+            renderCopyStatus(d);
+        }
+
+        // Tiempo real: el proxy envía el estado en cuanto cambia (/copy_events). Si la
+        // conexión cae, se consulta cada 2 s hasta que el navegador la recupera.
+        let lastCopyStatus = null;
+        function startCopyEvents() {
+            let fallback = null;
+            const poll = () => { if (!fallback) fallback = setInterval(refreshCopyStatus, 2000); };
+            if (!window.EventSource) { refreshCopyStatus(); poll(); return; }
+            const es = new EventSource('/copy_events');
+            es.onmessage = (ev) => {
+                if (fallback) { clearInterval(fallback); fallback = null; }
+                try { renderCopyStatus(JSON.parse(ev.data)); } catch (err) {}
+            };
+            es.onerror = poll;
+        }
+
+        function renderCopyStatus(d) {
+            lastCopyStatus = d;
             const card = document.getElementById('copy-card');
             if (!d.enabled) { card.classList.add('hidden'); return; }
             card.classList.remove('hidden');
@@ -732,7 +746,7 @@
                 chip.type = 'button';
                 const sel = f.name === selectedFolder ? ' ring-2 ring-offset-1 ring-blue-400' : '';
                 chip.className = 'px-2.5 py-1 rounded-full text-xs font-semibold border cursor-pointer transition hover:brightness-95' + sel + ' ' + (folderChip[f.activity] || folderChip.idle);
-                chip.onclick = () => { selectedFolder = selectedFolder === f.name ? null : f.name; refreshCopyStatus(); };
+                chip.onclick = () => { selectedFolder = selectedFolder === f.name ? null : f.name; lastCopyStatus ? renderCopyStatus(lastCopyStatus) : refreshCopyStatus(); };
                 const counts = [];
                 if (f.uploads) counts.push('⬆' + f.uploads);
                 if (f.reads) counts.push('⬇' + f.reads);

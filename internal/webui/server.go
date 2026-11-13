@@ -138,6 +138,7 @@ func (s *Server) Routes() http.Handler {
 	}
 	mux.HandleFunc("/web_session", s.handleWebSession)
 	mux.HandleFunc("/copy_status", s.handleCopyStatus)
+	mux.HandleFunc("/copy_events", s.handleCopyEvents)
 	mux.HandleFunc("/copy_bwlimit", s.handleCopyBWLimit)
 
 	return s.securityMiddleware(mux)
