@@ -716,8 +716,22 @@ func cleanLockPath(p string) string {
 	return path.Clean("/" + strings.TrimSpace(p))
 }
 
+// implicitLockWait es cuánto espera el bloqueo implícito de una petición (el que
+// x/net/webdav pone mientras dura un MKCOL, PUT, MOVE...) a que se libere otro
+// sobre la misma ruta, antes de responder 423.
+var implicitLockWait = 10 * time.Second
+
 func (l *resilientLockSystem) Create(now time.Time, details webdav.LockDetails) (string, error) {
 	tok, err := l.inner.Create(now, details)
+	// Dos peticiones simultáneas sobre la misma ruta (p. ej. dos subidas que crean a
+	// la vez la carpeta de una temporada nueva) chocan con el bloqueo implícito de la
+	// otra: la segunda espera a que acabe la primera en vez de fallar con 423. Los
+	// bloqueos explícitos de un cliente (LOCK, con propietario y caducidad) no esperan.
+	implicit := details.OwnerXML == "" && details.Duration < 0
+	for deadline := time.Now().Add(implicitLockWait); implicit && errors.Is(err, webdav.ErrLocked) && time.Now().Before(deadline); {
+		time.Sleep(50 * time.Millisecond)
+		tok, err = l.inner.Create(time.Now(), details)
+	}
 	if err != nil {
 		return "", err
 	}
