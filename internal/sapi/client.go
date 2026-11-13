@@ -1344,14 +1344,83 @@ func (c *Client) UpdateFolder(folderID int64, name string, parentID int64) error
 	}
 	defer resp.Body.Close()
 
+	b, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		b, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
 		return fmt.Errorf("update folder failed (%d): %s", resp.StatusCode, string(b))
+	}
+	// SAPI puede responder 200 con el error en el cuerpo.
+	var res struct {
+		Error *struct {
+			Code    string `json:"code"`
+			Message string `json:"message"`
+		} `json:"error"`
+	}
+	if err := json.Unmarshal(b, &res); err == nil && res.Error != nil {
+		if res.Error.Code == "FOL-1036" {
+			return ErrFolderUpdatesLimit
+		}
+		return fmt.Errorf("update folder API error: %s (%s)", res.Error.Message, res.Error.Code)
 	}
 	return nil
 }
 
+// ErrFolderUpdatesLimit (FOL-1036): la carpeta tiene más elementos de los que SAPI
+// deja mover o llevar a la papelera de una vez (folders.softdelete-updates-limit y
+// folders.move-updates-limit de /system/information).
+var ErrFolderUpdatesLimit = errors.New("la carpeta supera el límite de elementos por operación de Movistar Cloud (FOL-1036)")
+
 func (c *Client) DeleteFolder(folderID int64, permanent bool) error {
+	if c.WebMode() {
+		err := c.deleteFolderWeb(folderID, permanent)
+		if err == nil || errors.Is(err, ErrFolderUpdatesLimit) {
+			return err
+		}
+		logger.Log("[SAPI] ↪ Borrado de la carpeta %d rechazado como en la web (%v); se usa la llamada genérica.", folderID, err)
+	}
+	return c.deleteFolderLegacy(folderID, permanent)
+}
+
+// deleteFolderWeb borra como la web: a la papelera con action=softdelete y
+// {"data":{"ids":[id]}}, o definitivamente con action=delete y {"data":{"folders":[id]}}.
+func (c *Client) deleteFolderWeb(folderID int64, permanent bool) error {
+	action, key := "softdelete", "ids"
+	if permanent {
+		action, key = "delete", "folders"
+	}
+	body, _ := json.Marshal(map[string]interface{}{"data": map[string]interface{}{key: []int64{folderID}}})
+	req, err := http.NewRequest("POST", fmt.Sprintf("%s/media/folder?action=%s", c.baseURL, action), bytes.NewReader(body))
+	if err != nil {
+		return err
+	}
+	req.Header.Set("Content-Type", "application/json;charset=UTF-8")
+	resp, err := c.DoRequest(req)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+	b, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
+	var res struct {
+		Error *struct {
+			Code    string `json:"code"`
+			Message string `json:"message"`
+		} `json:"error"`
+	}
+	if err := json.Unmarshal(b, &res); err == nil && res.Error != nil {
+		switch res.Error.Code {
+		case "MED-1022":
+			return nil
+		case "FOL-1036":
+			return ErrFolderUpdatesLimit
+		}
+		return fmt.Errorf("delete folder API error: %s (%s)", res.Error.Message, res.Error.Code)
+	}
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return fmt.Errorf("delete folder failed (%d): %s", resp.StatusCode, string(b))
+	}
+	return nil
+}
+
+func (c *Client) deleteFolderLegacy(folderID int64, permanent bool) error {
 	action := "softdelete"
 	if permanent {
 		action = "delete"
@@ -1387,6 +1456,9 @@ func (c *Client) DeleteFolder(folderID int64, permanent bool) error {
 	if err := json.Unmarshal(b, &res); err == nil && res.Error != nil {
 		if res.Error.Code == "MED-1022" {
 			return nil
+		}
+		if res.Error.Code == "FOL-1036" {
+			return ErrFolderUpdatesLimit
 		}
 		return fmt.Errorf("delete folder API error: %s (%s)", res.Error.Message, res.Error.Code)
 	}
@@ -1439,6 +1511,80 @@ var (
 	mediaMoveMaxDelay   = 10 * time.Second
 )
 
+// webAsyncUploadMin es el minAsyncUploadFileSizeBytes de la web: solo los archivos
+// mayores se suben con acceptasynchronous=true (validación en segundo plano); los
+// pequeños se validan en la propia subida y se pueden mover enseguida.
+const webAsyncUploadMin = 209715200
+
+func uploadAcceptsAsync(webMode bool, size int64) bool {
+	return !webMode || size > webAsyncUploadMin
+}
+
+// mediaValidationPoll y mediaValidationMaxWait: consulta del estado de validación
+// tras un MED-1017, como hace la web con lo recién subido.
+var (
+	mediaValidationPoll    = 2 * time.Second
+	mediaValidationMaxWait = 2 * time.Minute
+)
+
+// MediaValidationStatus devuelve el estado de validación de un archivo
+// (POST /media?action=get-validation-status, el que consulta la web tras subir).
+// "V" y "A" indican que aún se está validando.
+func (c *Client) MediaValidationStatus(mediaID string) (string, error) {
+	u := fmt.Sprintf("%s/media?action=get-validation-status", c.baseURL)
+	body, _ := json.Marshal(map[string]interface{}{"data": map[string]interface{}{"ids": []map[string]string{{"id": mediaID}}}})
+	req, err := http.NewRequest("POST", u, bytes.NewReader(body))
+	if err != nil {
+		return "", err
+	}
+	req.Header.Set("Content-Type", "application/json;charset=UTF-8")
+	resp, err := c.DoRequest(req)
+	if err != nil {
+		return "", err
+	}
+	defer resp.Body.Close()
+	b, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return "", fmt.Errorf("validation status failed (%d): %s", resp.StatusCode, string(b))
+	}
+	var res struct {
+		Data struct {
+			IDs []struct {
+				ID     json.RawMessage `json:"id"`
+				Status string          `json:"status"`
+			} `json:"ids"`
+		} `json:"data"`
+	}
+	if err := json.Unmarshal(b, &res); err != nil {
+		return "", fmt.Errorf("validation status: %w", err)
+	}
+	for _, it := range res.Data.IDs {
+		if strings.Trim(string(it.ID), `"`) == mediaID {
+			return it.Status, nil
+		}
+	}
+	return "", fmt.Errorf("validation status: sin datos de %s", mediaID)
+}
+
+// waitMediaValidated espera a que el archivo deje de estar en validación. Devuelve
+// false si no se pudo saber o se agotó la espera.
+func (c *Client) waitMediaValidated(mediaID string) bool {
+	deadline := time.Now().Add(mediaValidationMaxWait)
+	for {
+		st, err := c.MediaValidationStatus(mediaID)
+		if err != nil {
+			return false
+		}
+		if st != "V" && st != "A" {
+			return true
+		}
+		if time.Now().After(deadline) {
+			return false
+		}
+		time.Sleep(mediaValidationPoll)
+	}
+}
+
 func mediaMoveDelay(attempt int) time.Duration {
 	d := mediaMoveRetryDelay * time.Duration(attempt+1)
 	if d > mediaMoveMaxDelay {
@@ -1476,6 +1622,12 @@ func (c *Client) UpdateMedia(mediaID, currentName, newName string, folderID int6
 			err = c.saveMediaMetadata(kind, mediaID, newName, folderID)
 			if err == nil || !strings.Contains(err.Error(), "MED-1017") || attempt >= mediaMoveRetries {
 				break
+			}
+			// En modo web se pregunta el estado de validación, como la web; si no
+			// se puede saber, se espera a ciegas.
+			if c.WebMode() && c.waitMediaValidated(mediaID) {
+				logger.Log("[SAPI] ⏳ '%s' estaba en validación (MED-1017); validado, reintento el movimiento (%d/%d).", newName, attempt+1, mediaMoveRetries)
+				continue
 			}
 			delay := mediaMoveDelay(attempt)
 			logger.Log("[SAPI] ⏳ '%s' aún en validación (MED-1017) al moverlo. Reintentando en %s (%d/%d)...", newName, delay, attempt+1, mediaMoveRetries)
@@ -1563,17 +1715,50 @@ var (
 	}
 )
 
+// webDeleteRequest es el borrado de la web: lleva a la papelera con
+// /media/<tipo>?action=delete&softdelete=true y {"data":{"<tipos>":[id]}}.
+func (c *Client) webDeleteRequest(kind, mediaID string) (*http.Request, error) {
+	var id interface{} = mediaID
+	if n, err := strconv.ParseInt(mediaID, 10, 64); err == nil {
+		id = n
+	}
+	body, _ := json.Marshal(map[string]interface{}{"data": map[string]interface{}{mediaPluralForKind(kind): []interface{}{id}}})
+	req, err := http.NewRequest("POST", fmt.Sprintf("%s/media/%s?action=delete&softdelete=true", c.baseURL, kind), bytes.NewReader(body))
+	if err != nil {
+		return nil, err
+	}
+	req.Header.Set("Content-Type", "application/json;charset=UTF-8")
+	return req, nil
+}
+
 func (c *Client) DeleteFile(mediaID string, nameOrKind ...string) error {
 	maxRetries := deleteRetries
 	u := fmt.Sprintf("%s/media?action=softdelete&id=%s", c.baseURL, mediaID)
+	// En modo web se borra como la web, con la operación del tipo (deducido del
+	// nombre); si la rechaza, se vuelve a la llamada genérica de siempre.
+	webKind := ""
+	if c.WebMode() {
+		webKind = "file"
+		if len(nameOrKind) > 0 {
+			webKind = mediaKindForName(nameOrKind[0])
+		}
+	}
 
 	var lastErr error
 	for attempt := 0; attempt <= maxRetries; attempt++ {
-		req, err := http.NewRequest("POST", u, strings.NewReader(""))
+		var req *http.Request
+		var err error
+		if webKind != "" {
+			req, err = c.webDeleteRequest(webKind, mediaID)
+		} else {
+			req, err = http.NewRequest("POST", u, strings.NewReader(""))
+			if err == nil {
+				req.Header.Set("Content-Type", "application/x-www-form-urlencoded; charset=UTF-8")
+			}
+		}
 		if err != nil {
 			return err
 		}
-		req.Header.Set("Content-Type", "application/x-www-form-urlencoded; charset=UTF-8")
 
 		resp, err := c.DoRequest(req)
 		if err != nil {
@@ -1583,6 +1768,12 @@ func (c *Client) DeleteFile(mediaID string, nameOrKind ...string) error {
 
 		if resp.StatusCode == http.StatusNotFound {
 			_ = resp.Body.Close()
+			if webKind != "" {
+				// Un 404 de la operación por tipo no prueba que el archivo ya no esté.
+				webKind = ""
+				attempt--
+				continue
+			}
 			return nil
 		}
 
@@ -1630,6 +1821,12 @@ func (c *Client) DeleteFile(mediaID string, nameOrKind ...string) error {
 				return nil
 			}
 			lastErr = fmt.Errorf("delete file API error: %s (%s)", res.Error.Message, res.Error.Code)
+			if webKind != "" {
+				logger.Log("[SAPI] ↪ Borrado de '%s' rechazado con media/%s (%s); se usa la llamada genérica.", mediaID, webKind, res.Error.Code)
+				webKind = ""
+				attempt--
+				continue
+			}
 			break
 		}
 
@@ -1648,8 +1845,11 @@ func (c *Client) DeleteFile(mediaID string, nameOrKind ...string) error {
 // si es cero, se usa la hora actual.
 func (c *Client) UploadFileToFolder(fileName string, reader io.Reader, size int64, folderID int64, mimeType string, existingMediaID string, modTime time.Time) (*MediaItem, error) {
 	c.mu.RLock()
-	uploadEndpoint := fmt.Sprintf("%s/sapi/upload?action=save&acceptasynchronous=true", c.uploadURL)
+	uploadEndpoint := fmt.Sprintf("%s/sapi/upload?action=save", c.uploadURL)
 	c.mu.RUnlock()
+	if uploadAcceptsAsync(c.WebMode(), size) {
+		uploadEndpoint += "&acceptasynchronous=true"
+	}
 
 	nowRFC := time.Now().UTC().Format("20060102T150405Z")
 	modRFC := nowRFC

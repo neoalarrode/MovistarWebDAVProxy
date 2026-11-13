@@ -458,6 +458,11 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// COPY de un archivo: copia en la nube, como la web, sin descargar ni subir.
+	if method == "COPY" && s.tryServerCopy(lw, r) {
+		return
+	}
+
 	// 4. Prevenir doble descarga en GET y sniffing en HEAD pre-configurando Content-Type
 	if method == "GET" || method == "HEAD" {
 		ext := filepath.Ext(urlPath)

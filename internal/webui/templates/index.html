@@ -109,6 +109,8 @@
                     <div class="flex justify-between text-slate-600"><span class="font-medium">Última comprobación:</span><span id="ws-checked" class="font-semibold">-</span></div>
                     <div class="flex justify-between text-slate-600"><span class="font-medium">Caduca:</span><span id="ws-expires" class="font-semibold">-</span></div>
                     <div class="flex justify-between text-slate-600"><span class="font-medium">Renovación automática:</span><span id="ws-renew" class="font-semibold">-</span></div>
+                    <div class="flex justify-between text-slate-600"><span class="font-medium">Papelera:</span><span id="ws-trash" class="font-semibold">-</span></div>
+                    <div id="ws-account" class="hidden text-xs text-slate-500 pt-1"></div>
                     <div class="flex justify-between text-slate-600"><span class="font-medium">Modo:</span><span class="font-semibold text-emerald-700">Navegador (Chromium sin pantalla)</span></div>
                 </div>
                 <p id="ws-hint" class="hidden text-xs text-rose-700 bg-rose-50 border border-rose-200 rounded-xl p-3 mb-4">La sesión ha caducado: inicia sesión de nuevo para que el proxy vuelva a funcionar.</p>
@@ -524,6 +526,18 @@
             document.getElementById('ws-renew').textContent = d.remember
                 ? (d.renewed_at ? 'sí · última ' + fmtTime(d.renewed_at) : 'sí')
                 : 'no (entra con e-mail y «No cerrar sesión»)';
+            const every = d.trash_empty_every && d.trash_empty_every !== '0s' ? 'se vacía cada ' + d.trash_empty_every.replace(/m0s$/, 'm').replace(/h0m$/, 'h') : 'vaciado automático desactivado';
+            document.getElementById('ws-trash').textContent = every + (d.trash_emptied_at ? ' · última ' + fmtTime(d.trash_emptied_at) : '');
+            const acc = d.account || {};
+            const parts = [];
+            if (acc['sapi.upload.max-size-in-mb']) parts.push('máx. por archivo ' + acc['sapi.upload.max-size-in-mb'] + ' MB');
+            if (acc['folders.softdelete-updates-limit']) parts.push('borrar carpeta ≤ ' + acc['folders.softdelete-updates-limit'] + ' elementos');
+            if (acc['folders.move-updates-limit']) parts.push('mover carpeta ≤ ' + acc['folders.move-updates-limit'] + ' elementos');
+            const exp = parseInt(acc['trash.cleanup.items-expire-time-in-minutes'], 10);
+            if (exp > 0) parts.push('Movistar vacía la papelera a los ' + (exp >= 1440 ? Math.round(exp / 1440) + ' días' : exp + ' min'));
+            const accEl = document.getElementById('ws-account');
+            accEl.textContent = parts.length ? 'Cuenta: ' + parts.join(' · ') : '';
+            accEl.classList.toggle('hidden', !parts.length);
         }
 
         const libStyle = {
