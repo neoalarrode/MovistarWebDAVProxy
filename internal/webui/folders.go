@@ -38,6 +38,8 @@ type folderFile struct {
 	Percentage int     `json:"percentage"`
 	Speed      float64 `json:"speed"`
 	ETA        *int64  `json:"eta"`
+	Idle       bool    `json:"idle,omitempty"`
+	IdleSecs   int64   `json:"idle_seconds,omitempty"`
 }
 
 type vfsQueueItem struct {
@@ -127,7 +129,7 @@ func buildFolders(dir string, st copyStatus, copyUploads int) []folderStatus {
 
 	// Actividad en vivo.
 	addFile := func(f *folderStatus, t copyTransfer, name, kind string) {
-		f.Files = append(f.Files, folderFile{Name: name, Kind: kind, Percentage: t.Percentage, Speed: t.Speed, ETA: t.ETA})
+		f.Files = append(f.Files, folderFile{Name: name, Kind: kind, Percentage: t.Percentage, Speed: t.Speed, ETA: t.ETA, Idle: t.Idle, IdleSecs: t.IdleSeconds})
 	}
 	// Las primeras copyUploads subidas son de la copia, con rutas relativas a la
 	// carpeta en curso; el resto, del montaje, con la carpeta como primer componente.

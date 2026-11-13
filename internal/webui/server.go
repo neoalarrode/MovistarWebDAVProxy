@@ -49,6 +49,7 @@ type Server struct {
 
 	copyDir        string // COPY_STATUS_DIR: registros del script de copia (solo lectura)
 	copyControlDir string // COPY_CONTROL_DIR: órdenes para el script (límite de ancho de banda)
+	reads          *readTracker
 }
 
 // SetWebSessionStatus publica en /web_session el estado de la sesión web (modo web).
@@ -85,6 +86,7 @@ func NewServerWithAuth(client *sapi.Client, webdavServer *webdav.Server, authCfg
 
 		copyDir:        strings.TrimSpace(os.Getenv("COPY_STATUS_DIR")),
 		copyControlDir: strings.TrimSpace(os.Getenv("COPY_CONTROL_DIR")),
+		reads:          newReadTracker(5 * time.Minute),
 	}
 
 	if client != nil {

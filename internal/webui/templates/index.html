@@ -596,7 +596,10 @@
                 name.title = t.name;
                 const info = document.createElement('span');
                 info.className = 'font-mono text-slate-500 whitespace-nowrap';
-                info.textContent = `${t.percentage}% · ${fmtBytes(t.bytes)} / ${fmtBytes(t.size)} · ${fmtBytes(t.speed)}/s · ${fmtETA(t.eta)}`;
+                info.textContent = t.idle
+                    ? `en búfer · hace ${fmtETA(t.idle_seconds)}`
+                    : `${t.percentage}% · ${fmtBytes(t.bytes)} / ${fmtBytes(t.size)} · ${fmtBytes(t.speed)}/s · ${fmtETA(t.eta)}`;
+                if (t.idle) row.style.opacity = '0.6';
                 top.append(name, info);
                 const bar = document.createElement('div');
                 bar.className = 'w-full h-1.5 bg-slate-100 rounded-full overflow-hidden';
@@ -674,7 +677,9 @@
                     const top = el('div', 'flex justify-between gap-3 mb-1');
                     const nm = el('span', 'font-medium text-slate-800 truncate', icon + ' ' + t.name);
                     nm.title = t.name;
-                    const info = t.kind === 'cache' ? 'esperando para subir' : `${t.percentage}% · ${fmtBytes(t.speed)}/s · ${fmtETA(t.eta)}`;
+                    const info = t.kind === 'cache' ? 'esperando para subir'
+                        : t.idle ? `en búfer · hace ${fmtETA(t.idle_seconds)}`
+                        : `${t.percentage}% · ${fmtBytes(t.speed)}/s · ${fmtETA(t.eta)}`;
                     top.append(nm, el('span', 'font-mono text-slate-500 whitespace-nowrap', info));
                     const bar = el('div', 'w-full h-1.5 bg-slate-100 rounded-full overflow-hidden');
                     const fill = el('div', 'h-full ' + color);

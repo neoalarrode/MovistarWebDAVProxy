@@ -43,6 +43,9 @@ type copyTransfer struct {
 	Percentage int     `json:"percentage"`
 	Speed      float64 `json:"speed"` // bytes/s
 	ETA        *int64  `json:"eta"`   // segundos, null si se desconoce
+
+	Idle        bool  `json:"idle,omitempty"`         // lectura en pausa (el reproductor tira de su búfer)
+	IdleSeconds int64 `json:"idle_seconds,omitempty"` // desde la última ráfaga
 }
 
 type copyStatus struct {
@@ -193,6 +196,11 @@ func tailLines(path string, max int64) []string {
 }
 
 func readCopyStatus(dir, controlDir string) copyStatus {
+	return readCopyStatusWith(dir, controlDir, nil)
+}
+
+// readCopyStatusWith es readCopyStatus con el seguimiento de lecturas recientes.
+func readCopyStatusWith(dir, controlDir string, reads *readTracker) copyStatus {
 	st := copyStatus{RecentErrors: []string{}, BWLimit: "off", Uploading: []copyTransfer{}, Reading: []copyTransfer{}}
 	if dir == "" {
 		return st
@@ -313,12 +321,15 @@ func readCopyStatus(dir, controlDir string) copyStatus {
 	// atribuye las de la copia a la carpeta en curso y las del montaje por su ruta.
 	copyUploads := len(st.Uploading)
 	separateMountUploads(dir, &st)
+	if reads != nil {
+		st.Reading = reads.merge(st.Reading, time.Now())
+	}
 	st.Folders = buildFolders(dir, st, copyUploads)
 	return st
 }
 
 func (s *Server) handleCopyStatus(w http.ResponseWriter, r *http.Request) {
-	jsonResponse(w, http.StatusOK, readCopyStatus(s.copyDir, s.copyControlDir))
+	jsonResponse(w, http.StatusOK, readCopyStatusWith(s.copyDir, s.copyControlDir, s.reads))
 }
 
 // handleCopyBWLimit guarda el límite pedido; el script de copia lo aplica en caliente.

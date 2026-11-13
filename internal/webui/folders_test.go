@@ -4,6 +4,7 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
 )
 
 func TestBuildFolders(t *testing.T) {
@@ -59,5 +60,23 @@ func TestBuildFolders(t *testing.T) {
 	}
 	if len(st.Uploading) != 2 {
 		t.Errorf("esperadas 2 subidas (copia + montaje), hay %d", len(st.Uploading))
+	}
+}
+
+// Una reproducción entre ráfagas sigue visible "en búfer" unos minutos y su
+// carpeta sigue contando como bajando; pasado el plazo desaparece.
+func TestReadTrackerKeepsBufferedReads(t *testing.T) {
+	rt := newReadTracker(5 * time.Minute)
+	t0 := time.Now()
+	avatar := copyTransfer{Name: "Peliculas/Avatar.mkv", Percentage: 60, Speed: 4e6}
+	if got := rt.merge([]copyTransfer{avatar}, t0); len(got) != 1 || got[0].Idle {
+		t.Fatalf("lectura activa: %+v", got)
+	}
+	got := rt.merge(nil, t0.Add(2*time.Minute))
+	if len(got) != 1 || !got[0].Idle || got[0].IdleSeconds != 120 || got[0].Speed != 0 {
+		t.Fatalf("entre ráfagas debe seguir en búfer: %+v", got)
+	}
+	if got := rt.merge(nil, t0.Add(6*time.Minute)); len(got) != 0 {
+		t.Fatalf("pasado el plazo debe desaparecer: %+v", got)
 	}
 }
