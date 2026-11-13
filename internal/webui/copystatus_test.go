@@ -79,3 +79,16 @@ func TestReadCopyStatus_IgnoresPreviousRun(t *testing.T) {
 		t.Fatalf("esperado Peliculas en curso, obtenido %q", st.Current)
 	}
 }
+
+// Si el log de rclone no es legible, los totales salen de stats.json.
+func TestReadCopyStatus_FallbackToStatsJSON(t *testing.T) {
+	dir := t.TempDir()
+	_ = os.WriteFile(filepath.Join(dir, "progress.log"), []byte("2026-11-13 10:54:41 INICIO AMC+\n"), 0o644)
+	_ = os.WriteFile(filepath.Join(dir, "AMC+.log"), []byte("2026/11/13 12:09:41 INFO  :   1 GiB / 2 GiB, 50%, 1 MiB/s, ETA 1s\n"), 0o000)
+	_ = os.WriteFile(filepath.Join(dir, "stats.json"), []byte(`{"bytes":160004636537,"totalBytes":180040000000,"speed":27890000,"eta":720,"transferring":[{"name":"x.mkv","size":10,"bytes":5,"percentage":50}]}`), 0o644)
+
+	st := readCopyStatus(dir, "")
+	if st.Percent != "88" || st.ETA != "12m0s" || st.Total == "" || st.Speed == "" {
+		t.Fatalf("respaldo desde stats.json incorrecto: %+v", st)
+	}
+}

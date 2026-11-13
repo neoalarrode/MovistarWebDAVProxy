@@ -3,12 +3,14 @@ package webui
 import (
 	"bufio"
 	"encoding/json"
+	"fmt"
 	"io"
 	"net/http"
 	"os"
 	"path/filepath"
 	"regexp"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -65,16 +67,33 @@ type copyStatus struct {
 
 // readTransfers lee un volcado de "rclone rc core/stats". Si es de hace más de
 // staleAfter (rclone parado o el volcador caído), se ignora.
+// rcloneTotals son los totales de la ejecución según "rclone rc core/stats".
+type rcloneTotals struct {
+	Bytes      int64
+	TotalBytes int64
+	Speed      float64
+	ETA        *int64
+}
+
 func readTransfers(path string, staleAfter time.Duration) ([]copyTransfer, float64) {
+	tr, tot := readRcloneStats(path, staleAfter)
+	return tr, tot.Speed
+}
+
+func readRcloneStats(path string, staleAfter time.Duration) ([]copyTransfer, rcloneTotals) {
+	var tot rcloneTotals
 	fi, err := os.Stat(path)
 	if err != nil || time.Since(fi.ModTime()) > staleAfter {
-		return nil, 0
+		return nil, tot
 	}
 	b, err := os.ReadFile(path)
 	if err != nil {
-		return nil, 0
+		return nil, tot
 	}
 	var stats struct {
+		Bytes        int64   `json:"bytes"`
+		TotalBytes   int64   `json:"totalBytes"`
+		ETA          *int64  `json:"eta"`
 		Speed        float64 `json:"speed"`
 		Transferring []struct {
 			Name       string  `json:"name"`
@@ -87,8 +106,9 @@ func readTransfers(path string, staleAfter time.Duration) ([]copyTransfer, float
 		} `json:"transferring"`
 	}
 	if json.Unmarshal(b, &stats) != nil {
-		return nil, 0
+		return nil, tot
 	}
+	tot = rcloneTotals{Bytes: stats.Bytes, TotalBytes: stats.TotalBytes, Speed: stats.Speed, ETA: stats.ETA}
 	out := make([]copyTransfer, 0, len(stats.Transferring))
 	for _, t := range stats.Transferring {
 		sp := t.SpeedAvg
@@ -98,7 +118,32 @@ func readTransfers(path string, staleAfter time.Duration) ([]copyTransfer, float
 		out = append(out, copyTransfer{Name: t.Name, Size: t.Size, Bytes: t.Bytes, Percentage: t.Percentage, Speed: sp, ETA: t.ETA})
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].Name < out[j].Name })
-	return out, stats.Speed
+	return out, tot
+}
+
+// humanBytes formatea en unidades binarias como rclone ("148.873 GiB").
+func humanBytes(n float64) string {
+	units := []string{"B", "KiB", "MiB", "GiB", "TiB", "PiB"}
+	i := 0
+	for n >= 1024 && i < len(units)-1 {
+		n /= 1024
+		i++
+	}
+	return fmt.Sprintf("%.3f %s", n, units[i])
+}
+
+func humanDuration(sec int64) string {
+	d := time.Duration(sec) * time.Second
+	h := int64(d.Hours())
+	m := int64(d.Minutes()) % 60
+	ss := int64(d.Seconds()) % 60
+	switch {
+	case h > 0:
+		return fmt.Sprintf("%dh%dm%ds", h, m, ss)
+	case m > 0:
+		return fmt.Sprintf("%dm%ds", m, ss)
+	}
+	return fmt.Sprintf("%ds", ss)
 }
 
 var (
@@ -238,8 +283,22 @@ func readCopyStatus(dir, controlDir string) copyStatus {
 	if fi, err := os.Stat(statsPath); err == nil && !runStart.IsZero() && fi.ModTime().Before(runStart) {
 		statsPath = "" // volcado de la ejecución anterior
 	}
-	if up, sp := readTransfers(statsPath, 90*time.Second); up != nil {
-		st.Uploading, st.UploadSpeed = up, sp
+	if up, tot := readRcloneStats(statsPath, 90*time.Second); up != nil {
+		st.Uploading, st.UploadSpeed = up, tot.Speed
+		// Respaldo: si el log de rclone no se pudo leer (permisos, recién creado...),
+		// los totales salen del volcado en vivo.
+		if st.Current != "" && st.Transferred == "" && tot.TotalBytes > 0 {
+			st.Transferred = humanBytes(float64(tot.Bytes))
+			st.Total = humanBytes(float64(tot.TotalBytes))
+			st.Percent = strconv.Itoa(int(tot.Bytes * 100 / tot.TotalBytes))
+			st.Speed = humanBytes(tot.Speed) + "/s"
+			if tot.ETA != nil {
+				st.ETA = humanDuration(*tot.ETA)
+			}
+			if fi, err := os.Stat(statsPath); err == nil {
+				st.StatsAt = fi.ModTime().Format("2006/01/02 15:04:05")
+			}
+		}
 	}
 	if rd, sp := readTransfers(filepath.Join(dir, "mount-stats.json"), 90*time.Second); rd != nil {
 		st.Reading, st.ReadSpeed = rd, sp
