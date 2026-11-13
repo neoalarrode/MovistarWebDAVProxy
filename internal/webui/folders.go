@@ -9,11 +9,11 @@ import (
 	"time"
 )
 
-// Carpetas de primer nivel de la biblioteca, con su actividad en vivo. Las detecta
-// un servicio del host (folders.json: listado de /mnt/emby_merged y si cada una
-// existe ya en la nube); si no hay volcado, se usa plan.txt.
+// Carpetas de primer nivel de la nube, con su actividad en vivo: las que detecta un
+// servicio del host en el montaje de la nube (folders.json) más las del plan de
+// copia que aún no han llegado. Lo que solo está en el NAS y no se copia no sale.
 //
-//	folders.json     {"folders":[{"name":"Peliculas","in_cloud":true}, ...]}
+//	folders.json     {"folders":[{"name":"Peliculas","in_cloud":true}, ...]}  (ls de /mnt/emby_cloud)
 //	vfs-queue.json   "rclone rc vfs/queue" del montaje: archivos en la caché de escritura
 //	origen-danado.txt  "<carpeta>\t<ruta>\t..." archivos ilegibles en el NAS
 
@@ -85,25 +85,21 @@ func buildFolders(dir string, st copyStatus, copyUploads int) []folderStatus {
 		for _, f := range detected.Folders {
 			add(f.Name).InCloud = f.InCloud
 		}
-	} else {
-		for _, l := range st.Libraries {
-			add(l.Name)
-		}
+	}
+	// Las del plan que aún no están en la nube también salen, como pendientes.
+	for _, l := range st.Libraries {
+		add(l.Name)
 	}
 
-	// Estado de la copia de cada carpeta. Las que no están en el plan (copias de
-	// seguridad de Emby, etc.) se muestran igual, marcadas como fuera de la copia.
+	// Estado de la copia de cada carpeta. Las de la nube que no están en el plan
+	// (creadas a mano, DVR...) se marcan como fuera de la copia.
 	if len(st.Libraries) > 0 {
 		for _, f := range byName {
 			f.Copy = "excluded"
 		}
 	}
 	for _, l := range st.Libraries {
-		f, ok := byName[l.Name]
-		if !ok {
-			continue // carpeta del plan que ya no existe
-		}
-		f.Copy = l.State
+		byName[l.Name].Copy = l.State
 	}
 	for _, line := range readLines(filepath.Join(dir, "origen-danado.txt")) {
 		parts := strings.SplitN(line, "\t", 3)
