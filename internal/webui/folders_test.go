@@ -14,7 +14,8 @@ func TestBuildFolders(t *testing.T) {
 		}
 	}
 	write("progress.log", "2026-11-13 08:00:00 INICIO Peliculas\n2026-11-13 10:54:41 FIN Peliculas rc=1\n2026-11-13 10:54:41 INICIO RTVE Play\n")
-	write("origen-danado.txt", "Peliculas\tCigüeñas.mkv\t1\tx\n")
+	// Incluye una línea sin ruta y un duplicado: no deben contar.
+	write("origen-danado.txt", "Peliculas\tCigüeñas.mkv\t1\tx\nPeliculas\t\t0\ty\nPeliculas\tCigüeñas.mkv\t1\tz\n")
 	write("plan.txt", "Peliculas\nRTVE Play\nNetflix\nMovistar+\nDisney+\n")
 	// folders.json es el ls del montaje de la nube: Disney+ (pendiente) aún no está.
 	write("folders.json", `{"folders":[{"name":"Peliculas","in_cloud":true},{"name":"RTVE Play","in_cloud":true},{"name":"Netflix","in_cloud":true},{"name":"Movistar+","in_cloud":true},{"name":"DVR","in_cloud":true}]}`)
@@ -42,6 +43,9 @@ func TestBuildFolders(t *testing.T) {
 	check("Movistar+", "upload", "pending")
 	check("DVR", "cache", "excluded")
 	check("Peliculas", "idle", "done_warn")
+	if f := got["Peliculas"]; f.Damaged != 1 || len(f.DamagedFiles) != 1 {
+		t.Errorf("Peliculas: esperado 1 dañado, hay %d (%q)", f.Damaged, f.DamagedFiles)
+	}
 	check("Disney+", "idle", "pending")
 	if f := got["Disney+"]; f.InCloud {
 		t.Error("Disney+ aún no está en la nube")

@@ -101,13 +101,21 @@ func buildFolders(dir string, st copyStatus, copyUploads int) []folderStatus {
 	for _, l := range st.Libraries {
 		byName[l.Name].Copy = l.State
 	}
+	seen := map[string]bool{}
 	for _, line := range readLines(filepath.Join(dir, "origen-danado.txt")) {
 		parts := strings.SplitN(line, "\t", 3)
-		if f := byName[parts[0]]; f != nil {
-			f.Damaged++
-			if len(parts) > 1 && len(f.DamagedFiles) < 50 {
-				f.DamagedFiles = append(f.DamagedFiles, parts[1])
-			}
+		if len(parts) < 2 || strings.TrimSpace(parts[1]) == "" {
+			continue // sin ruta: línea incompleta
+		}
+		key := parts[0] + "\t" + parts[1]
+		f := byName[parts[0]]
+		if f == nil || seen[key] {
+			continue
+		}
+		seen[key] = true
+		f.Damaged++
+		if len(f.DamagedFiles) < 50 {
+			f.DamagedFiles = append(f.DamagedFiles, parts[1])
 		}
 	}
 	for _, f := range byName {
