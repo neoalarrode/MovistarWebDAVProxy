@@ -294,9 +294,10 @@ func readCopyStatusWith(dir, controlDir string, reads *readTracker) copyStatus {
 	}
 	if up, tot := readRcloneStats(statsPath, 90*time.Second); up != nil {
 		st.Uploading, st.UploadSpeed = up, tot.Speed
-		// Respaldo: si el log de rclone no se pudo leer (permisos, recién creado...),
-		// los totales salen del volcado en vivo.
-		if st.Current != "" && st.Transferred == "" && tot.TotalBytes > 0 {
+		// Los totales salen del volcado en vivo (cada pocos segundos) en vez de la
+		// línea de estadísticas del log, que rclone solo escribe una vez por minuto;
+		// el log queda de respaldo si no hay volcado.
+		if st.Current != "" && tot.TotalBytes > 0 {
 			st.Transferred = humanBytes(float64(tot.Bytes))
 			st.Total = humanBytes(float64(tot.TotalBytes))
 			st.Percent = strconv.Itoa(int(tot.Bytes * 100 / tot.TotalBytes))

@@ -497,7 +497,13 @@
                 }
             } catch (err) {}
             refreshCopyStatus();
-            setInterval(refreshCopyStatus, 5000);
+            // Cada 2 s mientras la pestaña está visible; en segundo plano, cada 30 s.
+            let copyTimer = setInterval(refreshCopyStatus, 2000);
+            document.addEventListener('visibilitychange', () => {
+                clearInterval(copyTimer);
+                copyTimer = setInterval(refreshCopyStatus, document.hidden ? 30000 : 2000);
+                if (!document.hidden) refreshCopyStatus();
+            });
         }
 
         async function refreshWebSession() {
