@@ -63,6 +63,7 @@ type copyStatus struct {
 	Reading      []copyTransfer `json:"reading"`
 	UploadSpeed  float64        `json:"upload_speed"` // bytes/s según rclone en vivo
 	ReadSpeed    float64        `json:"read_speed"`
+	Folders      []folderStatus `json:"folders"`
 }
 
 // readTransfers lee un volcado de "rclone rc core/stats". Si es de hace más de
@@ -308,6 +309,11 @@ func readCopyStatus(dir, controlDir string) copyStatus {
 			st.BWLimit = strings.TrimSpace(string(b))
 		}
 	}
+	// Recuento de subidas de la copia antes de añadir las del montaje: buildFolders
+	// atribuye las de la copia a la carpeta en curso y las del montaje por su ruta.
+	copyUploads := len(st.Uploading)
+	separateMountUploads(dir, &st)
+	st.Folders = buildFolders(dir, st, copyUploads)
 	return st
 }
 
