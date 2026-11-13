@@ -1431,10 +1431,21 @@ func mediaKindForName(name string) string {
 
 // mediaMoveRetries y mediaMoveRetryDelay controlan los reintentos cuando SAPI todavía
 // está validando un archivo recién subido (MED-1017), igual que en subidas y borrados.
+// La espera crece con cada intento hasta mediaMoveMaxDelay (~70 s en total): algunos
+// archivos tardan más de 10 s en validarse.
 var (
-	mediaMoveRetries    = 6
+	mediaMoveRetries    = 10
 	mediaMoveRetryDelay = 1500 * time.Millisecond
+	mediaMoveMaxDelay   = 10 * time.Second
 )
+
+func mediaMoveDelay(attempt int) time.Duration {
+	d := mediaMoveRetryDelay * time.Duration(attempt+1)
+	if d > mediaMoveMaxDelay {
+		d = mediaMoveMaxDelay
+	}
+	return d
+}
 
 // UpdateMedia renombra y/o mueve un archivo (cambia su nombre y su carpeta).
 //
@@ -1466,8 +1477,9 @@ func (c *Client) UpdateMedia(mediaID, currentName, newName string, folderID int6
 			if err == nil || !strings.Contains(err.Error(), "MED-1017") || attempt >= mediaMoveRetries {
 				break
 			}
-			logger.Log("[SAPI] ⏳ '%s' aún en validación (MED-1017) al moverlo. Reintentando en %s (%d/%d)...", newName, mediaMoveRetryDelay, attempt+1, mediaMoveRetries)
-			time.Sleep(mediaMoveRetryDelay)
+			delay := mediaMoveDelay(attempt)
+			logger.Log("[SAPI] ⏳ '%s' aún en validación (MED-1017) al moverlo. Reintentando en %s (%d/%d)...", newName, delay, attempt+1, mediaMoveRetries)
+			time.Sleep(delay)
 		}
 		if err == nil {
 			if i > 0 {
