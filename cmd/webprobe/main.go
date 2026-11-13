@@ -90,6 +90,8 @@ func main() {
 	chunkName := flag.String("chunk", ".rclone_chunk.001_", "subcadena del archivo a usar en la prueba de descarga")
 	remoteLogin := flag.String("remote-login", "", "dirección donde servir la página de inicio de sesión remoto (p. ej. :8099)")
 	noSandbox := flag.Bool("no-sandbox", false, "lanzar Chromium sin sandbox (necesario como root en contenedores)")
+	dropSession := flag.Bool("drop-session", false, "borrar JSESSIONID antes de empezar (simula la caducidad de las 24 h)")
+	startPath := flag.String("path", "/", "ruta del portal con la que empezar (p. ej. /login)")
 	chromePath := flag.String("chrome", "", "ruta del ejecutable de Chrome/Chromium (por defecto, autodetectar)")
 	flag.Parse()
 
@@ -133,7 +135,13 @@ func main() {
 
 	b := &browser{ctx: ctx, deviceID: loadDeviceID(absProfile)}
 
-	if err := chromedp.Do(ctx, chromedp.Navigate(portal+"/")); err != nil {
+	if *dropSession {
+		if _, err := chromedp.Call(ctx, network.DeleteCookies, network.DeleteCookiesParams{Name: "JSESSIONID", Domain: ".micloud.movistar.es", Path: "/"}); err != nil {
+			log.Fatalf("borrar JSESSIONID: %v", err)
+		}
+		log.Println("JSESSIONID borrada")
+	}
+	if err := chromedp.Do(ctx, chromedp.Navigate(portal+*startPath)); err != nil {
 		log.Fatalf("navegar: %v", err)
 	}
 

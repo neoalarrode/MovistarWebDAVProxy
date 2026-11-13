@@ -107,6 +107,8 @@
                 <div class="bg-slate-50 border border-slate-200 rounded-xl p-3 mb-4 text-xs space-y-1.5">
                     <div class="flex justify-between text-slate-600"><span class="font-medium">Activa desde:</span><span id="ws-since" class="font-semibold">-</span></div>
                     <div class="flex justify-between text-slate-600"><span class="font-medium">Última comprobación:</span><span id="ws-checked" class="font-semibold">-</span></div>
+                    <div class="flex justify-between text-slate-600"><span class="font-medium">Caduca:</span><span id="ws-expires" class="font-semibold">-</span></div>
+                    <div class="flex justify-between text-slate-600"><span class="font-medium">Renovación automática:</span><span id="ws-renew" class="font-semibold">-</span></div>
                     <div class="flex justify-between text-slate-600"><span class="font-medium">Modo:</span><span class="font-semibold text-emerald-700">Navegador (Chromium sin pantalla)</span></div>
                 </div>
                 <p id="ws-hint" class="hidden text-xs text-rose-700 bg-rose-50 border border-rose-200 rounded-xl p-3 mb-4">La sesión ha caducado: inicia sesión de nuevo para que el proxy vuelva a funcionar.</p>
@@ -518,6 +520,10 @@
             }
             document.getElementById('ws-since').textContent = fmtTime(d.since);
             document.getElementById('ws-checked').textContent = fmtTime(d.checked_at);
+            document.getElementById('ws-expires').textContent = fmtTime(d.expires);
+            document.getElementById('ws-renew').textContent = d.remember
+                ? (d.renewed_at ? 'sí · última ' + fmtTime(d.renewed_at) : 'sí')
+                : 'no (entra con e-mail y «No cerrar sesión»)';
         }
 
         const libStyle = {

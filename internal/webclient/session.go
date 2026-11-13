@@ -63,8 +63,17 @@ type Session struct {
 	loggedIn   bool
 	checkedAt  time.Time
 	loginSince time.Time // desde cuándo está activa la sesión
+	expires    time.Time // caducidad de JSESSIONID (24 h desde el login, la actividad no la alarga)
+	remember   bool      // hay cookie PLC ("No cerrar sesión")
 
 	calls chan struct{} // concurrencia de llamadas a SAPI (la web usa 2)
+
+	// renewMu: las llamadas desde la pestaña y la lectura de credenciales lo toman
+	// en lectura; la renovación, en escritura. La PLC rota en cada reentrada y si
+	// dos peticiones sin JSESSIONID la usan a la vez Movistar la invalida.
+	renewMu      sync.RWMutex
+	lastRenewAt  time.Time
+	lastRenewTry time.Time
 }
 
 // Response es la respuesta de una llamada a SAPI hecha desde la pestaña.
@@ -84,6 +93,7 @@ func NewSession(opts Options) (*Session, error) {
 		return nil, err
 	}
 	go s.watchLogin()
+	go s.renewLoop()
 	return s, nil
 }
 
@@ -175,6 +185,8 @@ func (s *Session) Do(ctx context.Context, method, path string, body []byte, cont
 		return nil, ctx.Err()
 	}
 	defer func() { <-s.calls }()
+	s.renewMu.RLock()
+	defer s.renewMu.RUnlock()
 
 	tab, err := s.tab()
 	if err != nil {
@@ -220,6 +232,8 @@ func (s *Session) eval(tab context.Context, method, path string, body []byte, co
 // Credentials devuelve lo necesario para las subidas directas a upload.*: la
 // cabecera Cookie de la sesión y la validationKey.
 func (s *Session) Credentials(uploadURL string) (cookieHeader, validationKey string, err error) {
+	s.renewMu.RLock()
+	defer s.renewMu.RUnlock()
 	tab, err := s.tab()
 	if err != nil {
 		return "", "", err
@@ -230,6 +244,11 @@ func (s *Session) Credentials(uploadURL string) (cookieHeader, validationKey str
 	}
 	var parts []string
 	for _, c := range res.Cookies {
+		if c.Name == rememberCookie {
+			// Solo la usa la renovación: una subida sin JSESSIONID válida que la
+			// llevara reentraría por su cuenta y la gastaría.
+			continue
+		}
 		parts = append(parts, c.Name+"="+c.Value)
 		if c.Name == "validationKey" {
 			validationKey, _ = url.QueryUnescape(c.Value)
@@ -280,6 +299,13 @@ func (s *Session) Status() map[string]interface{} {
 	}
 	if s.loggedIn && !s.loginSince.IsZero() {
 		out["since"] = s.loginSince.Format(time.RFC3339)
+	}
+	if s.loggedIn && !s.expires.IsZero() {
+		out["expires"] = s.expires.Format(time.RFC3339)
+	}
+	out["remember"] = s.remember
+	if !s.lastRenewAt.IsZero() {
+		out["renewed_at"] = s.lastRenewAt.Format(time.RFC3339)
 	}
 	return out
 }
