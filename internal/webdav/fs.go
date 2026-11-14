@@ -2305,7 +2305,15 @@ func (w *WebDAVFileWriter) startStreamUpload(initialBytes []byte) {
 			<-uploadSem
 		}()
 		media, err := w.mfs.client.UploadFileToFolder(w.name, pr, expectedSize, w.parentFolderID, mimeType, w.sapiExistingID(), w.modTime)
-		_ = pr.Close()
+		if err != nil {
+			// Se registra aquí porque, si la subida a la nube se corta antes de que el
+			// cliente termine de enviar, Close() solo ve el cuerpo incompleto y el
+			// motivo real se perdía. El cliente recibe este error al escribir.
+			logger.Log("[WebDAV] ⚠️ Subida en flujo a la nube interrumpida para '%s' (%.2f MB): %v", w.name, sizeMB, err)
+			_ = pr.CloseWithError(err)
+		} else {
+			_ = pr.Close()
+		}
 		w.streamDone <- streamUploadResult{media: media, err: err}
 	}()
 
