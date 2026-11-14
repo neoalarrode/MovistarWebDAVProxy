@@ -620,6 +620,11 @@ type putStatusInterceptor struct {
 func (p *putStatusInterceptor) WriteHeader(statusCode int) {
 	if ((p.exceededFlag != nil && p.exceededFlag.Load()) || (p.guard != nil && p.guard.tooLarge.Load())) && statusCode >= 400 {
 		statusCode = http.StatusRequestEntityTooLarge
+	} else if p.guard != nil && p.guard.streamFailed.Load() && statusCode >= 400 {
+		// Subida en flujo sin copia local fallida: 503 para que el cliente (rclone)
+		// la trate como transitoria y la repita, en vez del 405 genérico.
+		p.Header().Set("Retry-After", "5")
+		statusCode = http.StatusServiceUnavailable
 	}
 	p.wroteHeader = true
 	p.ResponseWriter.WriteHeader(statusCode)

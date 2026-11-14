@@ -37,6 +37,8 @@ var (
 	folderLocks         sync.Map
 	ErrUploadTooLarge   = errors.New("file exceeds maximum allowed upload size")
 	ErrUploadIncomplete = errors.New("upload incomplete: connection cut or missing bytes")
+	// errStreamUploadFailed: la subida en flujo sin copia local falló; el cliente debe repetirla.
+	errStreamUploadFailed = errors.New("stream upload failed without local copy: retry the request")
 )
 
 // SetTransferLimits fija cuántas descargas y subidas simultáneas admite el proxy.
@@ -64,6 +66,9 @@ type uploadGuard struct {
 	expected int64 // Content-Length anunciado (-1 si no se sabe)
 	broken   atomic.Bool
 	tooLarge atomic.Bool
+	// streamFailed: la subida en flujo falló sin copia local para reintentar
+	// (WEBDAV_UPLOAD_SPOOL=false); el PUT responde 503 para que el cliente la repita.
+	streamFailed atomic.Bool
 }
 
 type guardedBody struct {
@@ -118,6 +123,14 @@ func GetUploadRAMBufferMaxBytes() int {
 		}
 	}
 	return 32 * 1024 * 1024 // 32 MB por defecto (cubre el 99% de bloques de Duplicati y restic en RAM sin tocar disco)
+}
+
+// uploadSpoolEnabled indica si las subidas en flujo guardan además una copia
+// completa en un temporal (RAM o disco) para reintentarlas sin el cliente. Con
+// WEBDAV_UPLOAD_SPOOL=false no se guarda: cada subida ocupa solo el búfer del flujo
+// y, si falla, el PUT responde 503 y el cliente la repite.
+func uploadSpoolEnabled() bool {
+	return !strings.EqualFold(strings.TrimSpace(os.Getenv("WEBDAV_UPLOAD_SPOOL")), "false")
 }
 
 func getUploadTempDir() string {
@@ -2227,6 +2240,7 @@ type WebDAVFileWriter struct {
 	streamPW       *io.PipeWriter
 	streamDone     chan streamUploadResult
 	streamFailed   bool
+	streamOnly     bool // subida en flujo sin copia local (WEBDAV_UPLOAD_SPOOL=false)
 }
 
 func NewWebDAVFileWriter(mfs *MovistarFS, path, name string, parentFolderID int64, existingID string) *WebDAVFileWriter {
@@ -2264,8 +2278,14 @@ func (w *WebDAVFileWriter) sapiExistingID() string {
 	return w.existingID
 }
 
+// canStream indica si la subida puede ir en flujo directo: tamaño anunciado,
+// carpeta real y no es un archivo de control.
+func (w *WebDAVFileWriter) canStream() bool {
+	return w.guard != nil && w.guard.expected > 0 && w.parentFolderID >= 0 && !isControlOrLockFile(w.path)
+}
+
 func (w *WebDAVFileWriter) startStreamUpload(initialBytes []byte) {
-	if w.guard == nil || w.guard.expected <= 0 || w.streamDone != nil || w.parentFolderID < 0 || isControlOrLockFile(w.path) {
+	if !w.canStream() || w.streamDone != nil {
 		return
 	}
 	w.ensurePathLock()
@@ -2345,6 +2365,30 @@ func (w *WebDAVFileWriter) Write(p []byte) (n int, err error) {
 	}
 
 	rambufMax := GetUploadRAMBufferMaxBytes()
+	overRAM := w.buf != nil && (w.buf.Len()+len(p) > rambufMax || (w.guard != nil && w.guard.expected > int64(rambufMax)))
+	if !w.streamOnly && w.tmpFile == nil && overRAM && !uploadSpoolEnabled() && w.canStream() {
+		// Sin copia local: lo recibido hasta ahora va al flujo y el resto directo.
+		var initialBytes []byte
+		if w.buf.Len() > 0 {
+			initialBytes = append([]byte(nil), w.buf.Bytes()...)
+		}
+		w.buf = nil
+		w.streamOnly = true
+		w.startStreamUpload(initialBytes)
+	}
+	if w.streamOnly {
+		w.size += int64(len(p))
+		if w.streamFailed || w.streamPW == nil {
+			w.guard.streamFailed.Store(true)
+			return 0, errStreamUploadFailed
+		}
+		if _, err := w.streamPW.Write(p); err != nil {
+			w.streamFailed = true
+			w.guard.streamFailed.Store(true)
+			return 0, err
+		}
+		return len(p), nil
+	}
 	if w.tmpFile == nil && (w.buf.Len()+len(p) > rambufMax || (w.guard != nil && w.guard.expected > int64(rambufMax))) {
 		tmpDir := getUploadTempDir()
 		tmp, err := os.CreateTemp(tmpDir, "webdav_upload_*")
@@ -2423,7 +2467,7 @@ func (w *WebDAVFileWriter) Close() error {
 		return ErrUploadIncomplete
 	}
 
-	if w.tmpFile == nil && w.buf == nil {
+	if w.tmpFile == nil && w.buf == nil && !w.streamOnly {
 		w.abortStream(errors.New("upload buffer corrupted"))
 		w.cleanupTemp()
 		return errors.New("upload buffer corrupted or closed after failure")
@@ -2521,6 +2565,14 @@ func (w *WebDAVFileWriter) Close() error {
 			}
 			logger.Log("[WebDAV] ❌ Subida rechazada por Movistar/O2 Cloud (MED-1020 tamaño máximo excedido): '%s'", w.name)
 			return ErrUploadTooLarge
+		} else if w.streamOnly {
+			// Sin copia local no hay con qué reintentar: que lo repita el cliente.
+			w.guard.streamFailed.Store(true)
+			logger.Log("[WebDAV] ❌ Subida en flujo fallida para '%s' (sin copia local, el cliente la repetirá): %v", w.name, res.err)
+			if res.err == nil {
+				res.err = errStreamUploadFailed
+			}
+			return res.err
 		} else {
 			logger.Log("[WebDAV] ⚠️ Subida en flujo requirió reintento desde disco para '%s': %v", w.name, res.err)
 		}
