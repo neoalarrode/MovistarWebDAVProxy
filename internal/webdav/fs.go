@@ -234,6 +234,16 @@ func isTolerantDelete(rawPath string, err error) bool {
 	return false
 }
 
+// waitFolderLock espera a que termine la operación en curso sobre cleanPath, si la
+// hay (p. ej. su creación), sin quedarse con el bloqueo.
+func waitFolderLock(cleanPath string) {
+	if val, ok := folderLocks.Load(cleanPath); ok {
+		mu := val.(*sync.Mutex)
+		mu.Lock()
+		mu.Unlock() //nolint:staticcheck // solo se espera a que se libere
+	}
+}
+
 func acquireFolderLock(cleanPath string) func() {
 	val, _ := folderLocks.LoadOrStore(cleanPath, &sync.Mutex{})
 	mu := val.(*sync.Mutex)
@@ -1303,6 +1313,11 @@ func (mfs *MovistarFS) Mkdir(ctx context.Context, name string, perm os.FileMode)
 		logger.Log("[WebDAV] 🧹 Ignorada creación de carpeta del sistema: '%s'", cleanPath)
 		return nil
 	}
+
+	// Si otra petición está creando ahora la carpeta madre (p. ej. varios MKCOL a la
+	// vez al empezar una carpeta nueva), se espera a que termine en vez de responder
+	// que no existe. Se espera antes de tomar el bloqueo propio para no anidarlos.
+	waitFolderLock(path.Dir(cleanPath))
 
 	unlock := acquireFolderLock(cleanPath)
 	defer unlock()

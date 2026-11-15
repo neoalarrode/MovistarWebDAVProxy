@@ -861,6 +861,10 @@ func isExpectedNotFound(method string, err error) bool {
 	switch method {
 	case "PROPFIND", "HEAD", "GET":
 		return true
+	case "MKCOL":
+		// MKCOL sin carpeta madre responde 409 y el cliente (p. ej. rclone) crea
+		// entonces la madre y lo repite: es parte del protocolo, no un error.
+		return true
 	}
 	return false
 }
