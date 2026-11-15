@@ -269,6 +269,7 @@ type Client struct {
 	maxUploadMB      int
 	rootFolderID     int64
 	sessionExpired   bool
+	refreshTransient bool
 	OnSessionExpired func(err error)
 
 	// web, si no es nil, sustituye la autenticación del cliente de escritorio por
@@ -285,6 +286,10 @@ type Client struct {
 
 // ErrFileTooLarge se devuelve cuando SAPI rechaza un archivo por superar el tamaño máximo permitido (MED-1020).
 var ErrFileTooLarge = errors.New("SAPI MED-1020: file size exceeds configured max file size limit")
+
+// ErrSessionRefreshTransient indica que la renovación de sesión falló por un
+// problema transitorio (red/5xx), no porque el refresh_token esté revocado.
+var ErrSessionRefreshTransient = errors.New("SAPI session refresh temporarily failed")
 
 func NewClient(cfg config.AccountConfig) (*Client, error) {
 	jar, err := cookiejar.New(nil)
@@ -432,6 +437,12 @@ func (c *Client) IsSessionExpired() bool {
 	return c.sessionExpired
 }
 
+func (c *Client) RefreshTransient() bool {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	return c.refreshTransient
+}
+
 func (c *Client) SetBaseURLs(baseURL, uploadURL string) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
@@ -468,13 +479,13 @@ func (c *Client) appendValidationKey(rawURL string) string {
 	return rawURL + sep + "validationkey=" + url.QueryEscape(vk)
 }
 
-func (c *Client) processSAPIResponse(resp *http.Response) {
-	if resp == nil || resp.StatusCode >= 400 {
-		return
+func (c *Client) processSAPIResponse(resp *http.Response) bool {
+	if resp == nil {
+		return false
 	}
 	if c.WebMode() {
 		// En modo web las credenciales viven en el navegador; no hay tokens que rotar.
-		return
+		return false
 	}
 
 	var changed bool
@@ -515,6 +526,7 @@ func (c *Client) processSAPIResponse(resp *http.Response) {
 
 	if changed {
 		c.syncCookiesLocked()
+		c.sessionExpired = false
 	}
 	cfgCopy := c.cfg
 	c.mu.Unlock()
@@ -523,6 +535,7 @@ func (c *Client) processSAPIResponse(resp *http.Response) {
 		_ = config.SaveAccountConfig(cfgCopy)
 		logger.Log("[OAuth] ✔ Nuevas credenciales/cookies capturadas y guardadas en disco.")
 	}
+	return changed
 }
 
 func (c *Client) RefreshSession() bool {
@@ -554,6 +567,9 @@ func (c *Client) RefreshSession() bool {
 	}
 
 	logger.Log("[OAuth] 🔄 Renovando sesión SAPI...")
+	c.mu.Lock()
+	c.refreshTransient = false
+	c.mu.Unlock()
 
 	// 1. Intento primario: SAPILoginOAuth con access_token actual
 	sapiBase := auth.GetSAPIBaseURL(cfg.Provider)
@@ -594,13 +610,30 @@ func (c *Client) RefreshSession() bool {
 		}
 	}
 
-	// 2. Si falla o expiró, canjear refresh_token en apiseg.telefonica.es
+	// 2. Si falla o expiró, canjear refresh_token en apiseg.telefonica.es.
+	// Reintentamos errores transitorios: un fallo puntual no debe convertir un
+	// DELETE de HyperBackup en un 405 y dejar el repositorio en state=broken.
 	var refreshErr error
+	var tokens *auth.OAuthTokens
 	if cfg.RefreshToken != "" {
-		logger.Log("[OAuth] 🔄 Canjeando refresh_token en apiseg.telefonica.es (%s)...", cfg.Provider)
-		tokens, err := auth.RefreshOAuthToken(cfg.RefreshToken, cfg.Provider)
-		refreshErr = err
-		if err == nil && tokens != nil && tokens.AccessToken != "" {
+		const refreshAttempts = 3
+		for attempt := 0; attempt < refreshAttempts; attempt++ {
+			logger.Log("[OAuth] 🔄 Canjeando refresh_token en apiseg.telefonica.es (%s) (%d/%d)...", cfg.Provider, attempt+1, refreshAttempts)
+			c.httpClient.CloseIdleConnections()
+			tokens, refreshErr = auth.RefreshOAuthToken(cfg.RefreshToken, cfg.Provider)
+			if refreshErr == nil {
+				break
+			}
+			if isTerminalRefreshError(refreshErr) {
+				break
+			}
+			if attempt < refreshAttempts-1 {
+				backoff := time.Duration(1<<attempt) * time.Second
+				logger.Log("[OAuth] ⏳ Error transitorio al renovar sesión: %v. Reintentando en %v...", refreshErr, backoff)
+				time.Sleep(backoff)
+			}
+		}
+		if refreshErr == nil && tokens != nil && tokens.AccessToken != "" {
 			c.mu.Lock()
 			c.sessionExpired = false
 			c.cfg.AccessToken = tokens.AccessToken
@@ -614,8 +647,22 @@ func (c *Client) RefreshSession() bool {
 			// Persistir inmediatamente los nuevos tokens para proteger contra RTR (Refresh Token Rotation)
 			_ = config.SaveAccountConfig(cfgCopy)
 
-			// Con nuevo access_token, inicializar SAPI
-			res := auth.SAPILoginOAuth(c.httpClient, sapiBase, tokens.AccessToken, cfgCopy.RefreshToken, cfgCopy.DeviceID, cfgCopy.DeviceName, cfgCopy.LastRefreshDate, cfgCopy.ExpiresIn)
+			// Con nuevo access_token, inicializar SAPI. Reintentamos el login
+			// (sin volver a rotar el refresh_token) por si el 401 es puntual.
+			var res auth.SAPILoginResult
+			for attempt := 0; attempt < 3; attempt++ {
+				res = auth.SAPILoginOAuth(c.httpClient, sapiBase, tokens.AccessToken, cfgCopy.RefreshToken, cfgCopy.DeviceID, cfgCopy.DeviceName, cfgCopy.LastRefreshDate, cfgCopy.ExpiresIn)
+				if res.StatusCode == http.StatusOK {
+					break
+				}
+				if res.StatusCode != http.StatusUnauthorized {
+					break
+				}
+				if attempt < 2 {
+					logger.Log("[OAuth] ⏳ SAPI devolvió 401 tras refresco; reintentando login en %v...", time.Duration(attempt+1)*time.Second)
+					time.Sleep(time.Duration(attempt+1) * time.Second)
+				}
+			}
 			if res.StatusCode == http.StatusOK {
 				c.mu.Lock()
 				c.sessionExpired = false
@@ -643,18 +690,33 @@ func (c *Client) RefreshSession() bool {
 				_ = config.SaveAccountConfig(cfgCopy2)
 				logger.Log("[OAuth] ✔ Tokens renovados y sesión SAPI inicializada con éxito.")
 				return true
-			} else {
-				logger.Log("[OAuth] ⚠️ Inicialización SAPI devolvió HTTP %d tras refresco: %v", res.StatusCode, res.Error)
 			}
-		} else if err != nil {
-			logger.Log("[OAuth] ❌ Error canjeando refresh_token: %v", err)
+			if res.StatusCode == http.StatusUnauthorized {
+				c.mu.Lock()
+				c.sessionExpired = true
+				c.refreshTransient = false
+				c.mu.Unlock()
+				logger.Log("[!] ⚠️ Tokens renovados pero SAPI rechaza la sesión (401). Revincula la cuenta desde el panel web para evitar rotaciones inútiles del refresh_token.")
+				if c.OnSessionExpired != nil {
+					go c.OnSessionExpired(errors.New("sesión SAPI rechazada tras refresco (HTTP 401)"))
+				}
+				return false
+			}
+			logger.Log("[OAuth] ⚠️ Inicialización SAPI devolvió HTTP %d tras refresco: %v", res.StatusCode, res.Error)
+			c.mu.Lock()
+			c.refreshTransient = true
+			c.mu.Unlock()
+			return false
+		} else if refreshErr != nil {
+			logger.Log("[OAuth] ❌ Error canjeando refresh_token: %v", refreshErr)
 		}
 	}
 
-	if refreshErr != nil && (strings.Contains(refreshErr.Error(), "401") || strings.Contains(refreshErr.Error(), "invalid_grant")) {
+	if refreshErr != nil && isTerminalRefreshError(refreshErr) {
 		c.mu.Lock()
 		wasExpired := c.sessionExpired
 		c.sessionExpired = true
+		c.refreshTransient = false
 		c.mu.Unlock()
 
 		logger.Log("[!] ⚠️ ERROR 401: El refresh_token ha expirado o ha sido revocado. Pausando reintentos automáticos hasta revinculación en el panel web.")
@@ -662,9 +724,22 @@ func (c *Client) RefreshSession() bool {
 			go c.OnSessionExpired(errors.New("sesión expirada (HTTP 401)"))
 		}
 	} else {
+		if refreshErr != nil {
+			c.mu.Lock()
+			c.refreshTransient = true
+			c.mu.Unlock()
+		}
 		logger.Log("[!] ⚠️ Error transitorio durante renovación de sesión. Conservando credenciales para futuros reintentos.")
 	}
 	return false
+}
+
+func isTerminalRefreshError(err error) bool {
+	if err == nil {
+		return false
+	}
+	msg := err.Error()
+	return strings.Contains(msg, "401") || strings.Contains(msg, "invalid_grant")
 }
 
 func (c *Client) SetPacingInterval(d time.Duration) {
@@ -716,7 +791,8 @@ func (c *Client) doRequestLocked(req *http.Request) (*http.Response, error) {
 	c.mu.RUnlock()
 
 	// Inyectar cabeceras comunes
-	req.Header.Set("User-Agent", auth.DesktopUserAgent)
+	userAgent := auth.GetSAPIUserAgent()
+	req.Header.Set("User-Agent", userAgent)
 	if req.Header.Get("Accept") == "" {
 		req.Header.Set("Accept", "*/*")
 	}
@@ -752,7 +828,20 @@ func (c *Client) doRequestLocked(req *http.Request) (*http.Response, error) {
 		return nil, err
 	}
 
-	c.processSAPIResponse(resp)
+	credentialsRotated := c.processSAPIResponse(resp)
+
+	// El cliente oficial también procesa la cabecera Authorization de las
+	// respuestas 401: si SAPI entrega tokens rotados, la petición se reintenta
+	// inmediatamente con la nueva credencial.
+	if resp.StatusCode == http.StatusUnauthorized && credentialsRotated && (req.Body == nil || req.GetBody != nil) {
+		_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, 4096))
+		_ = resp.Body.Close()
+		retried, retryErr := c.retryRequestWithCurrentConfig(req)
+		if retryErr != nil {
+			return nil, retryErr
+		}
+		return retried, nil
+	}
 
 	if resp.StatusCode == http.StatusUnauthorized {
 		if req.Body != nil && req.GetBody == nil {
@@ -807,13 +896,16 @@ func (c *Client) doRequestLocked(req *http.Request) (*http.Response, error) {
 				}
 				return resp2, err2
 			}
+			if c.RefreshTransient() {
+				return nil, fmt.Errorf("%w (%s %s)", ErrSessionRefreshTransient, req.Method, req.URL.Path)
+			}
 			// Restaurar cuerpo legible si RefreshSession falló para evitar "http: read on closed response body"
 			resp.Body = io.NopCloser(bytes.NewReader(bodyBytes))
 		}
 	}
 
 	// Manejo de retroceso suave ante HTTP 429 (Too Many Requests) o 503 (Service Unavailable)
-	if (resp.StatusCode == http.StatusTooManyRequests || resp.StatusCode == http.StatusServiceUnavailable) &&
+	if (resp.StatusCode == http.StatusTooManyRequests || resp.StatusCode == http.StatusServiceUnavailable || resp.StatusCode == http.StatusRequestTimeout) &&
 		(req.Body == nil || req.GetBody != nil) {
 		const maxBackoffRetries = 4
 		for retry := 1; retry <= maxBackoffRetries; retry++ {
@@ -823,7 +915,10 @@ func (c *Client) doRequestLocked(req *http.Request) (*http.Response, error) {
 			}
 			jitter := time.Duration((time.Now().UnixNano()%400)+100) * time.Millisecond
 			sleepDur := backoff + jitter
-			logger.Log("[SAPI] ⏳ Rate limit o servicio ocupado (%s %s HTTP %d). Reintentando en %v (%d/%d)...", req.Method, req.URL.Path, resp.StatusCode, sleepDur, retry, maxBackoffRetries)
+			if resp.StatusCode == http.StatusRequestTimeout {
+				c.httpClient.CloseIdleConnections()
+			}
+			logger.Log("[SAPI] ⏳ Rate limit, timeout o servicio ocupado (%s %s HTTP %d). Reintentando en %v (%d/%d)...", req.Method, req.URL.Path, resp.StatusCode, sleepDur, retry, maxBackoffRetries)
 			resp.Body.Close()
 			time.Sleep(sleepDur)
 
@@ -852,6 +947,45 @@ func (c *Client) doRequestLocked(req *http.Request) (*http.Response, error) {
 		}
 	}
 
+	return resp, nil
+}
+
+func (c *Client) retryRequestWithCurrentConfig(req *http.Request) (*http.Response, error) {
+	cfg := c.GetConfig()
+	var retryBody io.Reader
+	if req.GetBody != nil {
+		body, err := req.GetBody()
+		if err != nil {
+			return nil, err
+		}
+		retryBody = body
+	}
+	newReq, err := http.NewRequest(req.Method, req.URL.String(), retryBody)
+	if err != nil {
+		return nil, err
+	}
+	newReq.Header = req.Header.Clone()
+	newReq.Header.Del("Authorization")
+	newReq.Header.Del("Cookie")
+	if cfg.AccessToken != "" {
+		newReq.Header.Set("Authorization", auth.BuildOAuthHeader(cfg.AccessToken, cfg.RefreshToken, cfg.LastRefreshDate, cfg.ExpiresIn))
+	}
+	if cfg.JSessionID != "" || cfg.ValidationKey != "" {
+		var cookies []string
+		if cfg.JSessionID != "" {
+			cookies = append(cookies, "JSESSIONID="+cfg.JSessionID)
+		}
+		if cfg.ValidationKey != "" {
+			cookies = append(cookies, "validationkey="+cfg.ValidationKey)
+		}
+		newReq.Header.Set("Cookie", strings.Join(cookies, "; "))
+	}
+	newReq.URL, _ = url.Parse(c.appendValidationKey(newReq.URL.String()))
+	resp, err := c.httpClient.Do(newReq)
+	if err != nil {
+		return nil, err
+	}
+	c.processSAPIResponse(resp)
 	return resp, nil
 }
 
@@ -1966,6 +2100,23 @@ func (c *Client) UploadFileToFolder(fileName string, reader io.Reader, size int6
 				continue
 			}
 			return nil, fmt.Errorf("upload failed: rate limited or service unavailable (HTTP %d) after %d retries: %s", resp.StatusCode, maxRetries, bStr)
+		}
+
+		// 408: el host de subida cerró una conexión keep-alive obsoleta
+		// ("Server timeout waiting for the HTTP request from the client").
+		// Forzamos conexión nueva y reintentamos si el cuerpo es replayable.
+		if resp.StatusCode == http.StatusRequestTimeout {
+			if attempt < maxRetries && canRetry {
+				backoff := time.Duration(1<<attempt) * time.Second
+				if backoff > 4*time.Second {
+					backoff = 4 * time.Second
+				}
+				c.httpClient.CloseIdleConnections()
+				logger.Log("[SAPI] ⏳ Conexión de subida obsoleta (HTTP 408). Reintentando con conexión nueva en %v (%d/%d)...", backoff, attempt+1, maxRetries)
+				time.Sleep(backoff)
+				continue
+			}
+			return nil, fmt.Errorf("upload failed: request timeout (HTTP 408) after %d retries: %s", maxRetries, bStr)
 		}
 
 		if resp.StatusCode == http.StatusRequestEntityTooLarge || strings.Contains(bStr, "MED-1020") {

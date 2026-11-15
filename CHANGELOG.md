@@ -2,6 +2,46 @@
 
 Todos los cambios notables en **Movistar / O2 Cloud WebDAV Proxy** se documentan en este archivo.
 
+## [v2.4.4] - 2026-11-14
+
+### 🛠️ Synology Hyper Backup: Auto-healing de `Control/@writer` y carpetas reales
+- **Auto-healing de estado (`#23`, PR `#40`):** al listar `Control/@writer`, si existe `seq_mapping` pero faltan los ficheros de 0 bytes `v1.cformat` o `v1.<seq_id>.-1.0.0.none.none.cinfo` (por reinicio del contenedor o expiración de caché), el proxy lee `MAX(CAST(seq_id AS INTEGER))` de `seq_mapping` y reconstruye ambos ficheros virtuales automáticamente en la caché SQLite.
+- **Emulación local estricta a 0 bytes:** los archivos `> 0` bytes y las carpetas `@reader` se crean y suben a Movistar Cloud en lugar de emularse solo en RAM.
+
+### 🔐 WebUI Login CSRF y Documentación
+- **Login WebUI (`Referrer-Policy: same-origin`):** corregido el rechazo `Origen de solicitud no permitido (CSRF)` (`Origin: null`) al enviar el formulario `POST /login`, añadiendo también soporte `HEAD /login`.
+- **Documentación (`README.md`):** documentado el uso opcional de `WEBDAV_TMPDIR=/app/tmp` junto con un volumen en disco para NAS con poca RAM.
+
+## [v2.4.3] - 2026-11-13
+
+### 🛠️ Evitar el bucle 401 y las rotaciones inútiles del refresh_token
+
+- **Síntoma:** el canje de `refresh_token` devolvía tokens correctamente, pero el `SAPILoginOAuth` posterior seguía devolviendo 401. El proxy volvía a intentar el canje cada 30–60 s, rotando el refresh_token sin recuperar la sesión.
+- **Corrección:** tras un canje correcto se reintenta el login SAPI hasta 3 veces **con los mismos tokens nuevos** (sin volver a rotar el refresh_token). Si SAPI sigue devolviendo 401, la sesión se marca como expirada y se pide revincular desde el panel web; KeepAlive y DeltaSync dejan de rotar credenciales automáticamente.
+- **Recuperación:** en ese estado hay que volver a vincular la cuenta desde el panel. El proxy ya no entra en un bucle de refresh/401.
+
+### 🔐 Compatibilidad con el cliente actual y rotación de credenciales
+
+- **User-Agent SAPI configurable:** el transporte SAPI usa por defecto un User-Agent Edge; CloudFront bloquea el UA antiguo de la app Windows antes de llegar a Movistar. Se puede cambiar con `SAPI_USER_AGENT` sin recompilar.
+- **Login OAuth directo:** se elimina la llamada inicial a `/sapi/login/oauth`, que el cliente de escritorio actual no referencia. Tras canjear el código se guardan los tokens y se usan directamente en las peticiones SAPI.
+- **Rotación por cabecera:** las respuestas `Authorization` de SAPI se procesan incluso cuando la respuesta HTTP es `401`; si llegan tokens rotados, la petición se reintenta con ellos.
+- **Hyper Backup:** `Control/@writer` se trata como estado persistente, mientras que `@reader` y los locks siguen efímeros. Esto conserva `sequence_id`, `seq_mapping` y `v1.cformat` y evita `cloud-seq-id [-1]`.
+
+### 🖥️ Panel y operación
+
+- Favicon local servido por `/favicon.ico`.
+- El panel muestra el puerto WebDAV host desde `WEBDAV_HOST_PORT`.
+- Eliminados el recuadro de Device ID y el importador de sesiones de Chrome.
+- Añadidas `TELEGRAM_BOT_TOKEN` y `TELEGRAM_CHAT_ID` a la configuración Docker; el panel muestra Token enmascarado y Chat ID cuando están completos.
+
+## [v2.4.2] - 2026-11-13
+
+### 🛠️ Subidas HTTP 408 y renovación transitoria en DELETE
+
+- **HTTP 408 al subir fragmentos grandes (`upload failed (408)`):** el host de subida devolvía `Server timeout waiting for the HTTP request from the client` al reutilizar una conexión keep-alive que ya había caducado. El transporte HTTP/1.1 de `upload.*` ahora usa `DisableKeepAlives` (conexión nueva por subida) y `UploadFileToFolder` reintenta 408 con `CloseIdleConnections()` y backoff cuando el cuerpo es replayable.
+- **401/405 al borrar carpetas tras una renovación transitoria:** `RefreshSession` reintenta 2 veces adicionales los errores transitorios del `refresh_token` (no los 401/`invalid_grant`). El borrado de archivos y carpetas reintenta también si la renovación es transitoria y, si aun así falla, el handler DELETE responde **503 + `Retry-After: 30`** en lugar del 405 genérico de `x/net/webdav`, para que HyperBackup reintente sin marcar el repositorio como `broken`.
+- **Tests añadidos:** reintento de subida tras 408 con servidor simulado, verificación de `DisableKeepAlives` y clasificación terminal/transitoria de errores de renovación.
+
 ## [v2.4.1] - 2026-11-12
 
 ### 🛠️ Corrección de PAPI-0000 al reescribir archivos vacíos y zona horaria de logs

@@ -5,6 +5,9 @@
 [![Image Size](https://img.shields.io/badge/Image%20Size-~20%20MB-success)](https://hub.docker.com/r/uniextra/movistar-webdav-proxy)
 [![RAM Usage](https://img.shields.io/badge/RAM%20Usage-~6.5%20MB-success)](https://hub.docker.com/r/uniextra/movistar-webdav-proxy)
 
+> [!WARNING]
+> **Proyecto en desarrollo activo:** Este proyecto está en desarrollo y evoluciona constantemente. Se realizan cambios y actualizaciones frecuentes para corregir problemas, mejorar la estabilidad y ajustar la compatibilidad con Movistar/O2 Cloud. Por este motivo, el comportamiento puede cambiar entre versiones y pueden aparecer incidencias. Consulta las últimas actualizaciones y revisa la documentación antes de actualizar o desplegar una nueva versión.
+
 > [!NOTE]
 > **Aviso de Proyecto No Oficial e Independiente:** Este software es un desarrollo comunitario y no oficial para fines de interoperabilidad y copias de seguridad personales. No está afiliado, asociado, patrocinado ni respaldado por Telefónica, S.A. ni por Movistar/O2. Consulta [DISCLAIMER.md](DISCLAIMER.md) y [TRADEMARKS.md](TRADEMARKS.md) para más información.
 
@@ -68,11 +71,15 @@ services:
       # Opcional: credenciales distintas para el panel web (si no se definen, usa las de WebDAV)
       # - WEBUI_USER=admin
       # - WEBUI_PASSWORD=OtroPasswordSeguro
+      # Opcional: guardar archivos temporales grandes en disco en lugar de RAM (/tmp)
+      # - WEBDAV_TMPDIR=/app/tmp
     ports:
       - "${BIND_IP:-0.0.0.0}:5000:5000"   # Panel Web de Gestión y Logs (usa BIND_IP=127.0.0.1 para solo localhost)
       - "${BIND_IP:-0.0.0.0}:5050:8080"   # Endpoint WebDAV (puerto 5050 en el host)
     volumes:
       - movistar_tokens:/app/tokens
+      # Opcional (requiere WEBDAV_TMPDIR=/app/tmp): útil en NAS con poca RAM para subidas grandes
+      # - /ruta/en/tu/nas/tmp:/app/tmp
 
 volumes:
   movistar_tokens:
@@ -103,10 +110,13 @@ docker run -d \
 ## 🔒 Seguridad y Variables de Entorno
 
 ### Recomendaciones de Seguridad y Autenticación
-* **Autenticación HTTP Basic Robusta y Normalización:** Tanto el servidor WebDAV como el panel web validan usuario y contraseña en tiempo constante contra ataques de temporización (`subtle.ConstantTimeCompare`).
-  * **Normalización de usuarios Windows:** Los prefijos de dominio habituales de Windows WebClient (`DOMAIN\usuario` o `\usuario`) se normalizan automáticamente a `usuario`, ignorando espacios en blanco accidentales.
+* **Autenticación Web y WebDAV Robusta con Normalización:**
+  * **Panel Web con Login Moderno:** El panel de control web (`:5000`) cuenta con un formulario de inicio de sesión minimalista y seguro, con soporte nativo de autocompletado para gestores de contraseñas (*Bitwarden*, *1Password*, *KeePass*, *Google Chrome*, *Apple Keychain*), cookies de sesión HttpOnly/SameSite seguras y botón de cierre de sesión.
+  * **Clientes WebDAV (RFC 4918):** El endpoint WebDAV (`:5050`) mantiene compatibilidad estándar con HTTP Basic Auth y NTLMv2 para herramientas de copia y sistemas operativos (*Duplicati*, *Synology HyperBackup*, *Rclone*, *Windows WebClient*, *macOS Finder*).
+  * **Validación en Tiempo Constante:** Ambos servicios validan credenciales contra ataques de temporización (`subtle.ConstantTimeCompare`).
+  * **Normalización de usuarios Windows:** Los prefijos de dominio habituales de Windows WebClient (`DOMAIN\\usuario` o `\\usuario`) se normalizan automáticamente a `usuario`, ignorando espacios en blanco accidentales.
   * **Preservación intacta de contraseñas:** La contraseña se preserva exactamente tal como se envía, permitiendo contraseñas complejas con dos puntos (`:`) o espacios internos.
-  * **Desafío RFC 4918 (`401 Unauthorized`):** Toda petición no autenticada o con credenciales erróneas recibe un código HTTP `401 Unauthorized` junto al encabezado estándar `WWW-Authenticate: Basic realm="WebDAV"`.
+  * **Desafío RFC 4918 (`401 Unauthorized`):** Toda petición WebDAV no autenticada o con credenciales erróneas recibe un código HTTP `401 Unauthorized` junto al encabezado estándar `WWW-Authenticate: Basic realm="WebDAV"`.
   * **Descubrimiento Windows WebClient:** La petición inicial `OPTIONS /` sin credenciales devuelve `200 OK` con `MS-Author-Via: DAV` y cabeceras de conformidad `DAV: 1, 2`, permitiendo al explorador de Windows identificar el servicio antes de solicitar credenciales en `PROPFIND /`.
 * **Topologías de Red Docker y Detección de IP:**
   * **Docker Bridge (por defecto):** Mediante `BRUTE_FORCE_EXCLUDED_IPS`, las subredes puente estándar de Docker (`172.17.0.0/16`, `172.18.0.0/16`) y loopback (`127.0.0.1`, `::1`) quedan excluidas del bloqueo por fuerza bruta (HTTP 429). Esto evita que múltiples clientes compartiendo el gateway de Docker (ej. `172.18.0.1`) queden bloqueados accidentalmente. **La autenticación Basic Auth se exige y valida en todo momento (las exclusiones solo evitan el baneo 429, nunca eluden la clave).**
@@ -139,11 +149,14 @@ docker run -d \
 | `WEBDAV_PORT` | `8080` | Puerto interno del servidor WebDAV. |
 | `TOKENS_DIR` | `/app/tokens` | Directorio donde se almacenan las credenciales OAuth2 (`0700`). |
 | `TOKENS_ENCRYPTION_KEY` | *(vacío)* | Clave opcional para cifrar en reposo (AES-256-GCM) los tokens guardados en disco. |
+| `WEBDAV_HOST_PORT` | `5050` | Puerto público de WebDAV que se muestra en el panel; en Compose se toma de `WEBDAV_PORT`. |
+| `TELEGRAM_BOT_TOKEN` | *(vacío)* | Token del bot de Telegram para alertas de sesión. |
+| `TELEGRAM_CHAT_ID` | *(vacío)* | Chat o canal de Telegram que recibirá las alertas. |
 | `MAX_UPLOAD_MB` | `4096` | Tamaño máximo permitido por archivo en subidas `PUT` (en MB). |
 | `WEBDAV_BUFFER_MB` | `32` | Tamaño máximo del búfer en RAM (MB) antes de hacer spool a disco (óptimo Duplicati). |
 | `TRUSTED_PROXIES` | *(vacío)* | Lista de IPs/CIDRs de proxies de confianza para evaluar `X-Forwarded-For` / `X-Real-IP`. |
 | `BRUTE_FORCE_EXCLUDED_IPS` | `127.0.0.1,::1,172.17.0.0/16,172.18.0.0/16` | IPs/subredes exentas de bloqueo HTTP 429 (mantiene Basic Auth activo). |
-| `WEBDAV_TMPDIR` | `/tmp` | Directorio para archivos temporales durante subidas mayores al buffer RAM. |
+| `WEBDAV_TMPDIR` | `/tmp` | Directorio para archivos temporales durante subidas mayores al buffer RAM. Si montas un volumen en disco (ej. `/app/tmp`), debes definir `WEBDAV_TMPDIR=/app/tmp` para que se utilice. |
 | `SHUTDOWN_TIMEOUT_SEC` | `30` | Tiempo máximo de espera (segundos) para un apagado ordenado. |
 
 > **Nota Legal / Términos de Uso:** Este proyecto es una herramienta independiente de interoperabilidad personal y no está afiliado, patrocinado ni respaldado por Telefónica / Movistar / O2. El cliente utiliza los identificadores OAuth del cliente de escritorio para permitir al titular legítimo de la línea acceder a su propio espacio mediante el estándar WebDAV. Úsalo bajo tu propia responsabilidad y conforme a las condiciones de tu servicio contratado.
@@ -228,7 +241,7 @@ Aunque Movistar Cloud y O2 Cloud ofrecen **almacenamiento total ilimitado**, la 
    * El proxy gestiona esto automáticamente mediante un **semáforo de concurrencia 1:1** (idéntico al motor serie del cliente oficial de escritorio) para operar siempre sin provocar bloqueos de CloudFront WAF ni errores `HTTP 429`.
 
 3. **🔤 Caracteres reservados en nombres de archivo:**
-   * Evita el uso de caracteres especiales no compatibles con URLs o APIs REST (`\`, `:`, `*`, `?`, `"`, `<`, `>`, `|`) en los nombres de archivos o directorios.
+   * Evita el uso de caracteres especiales no compatibles con URLs o APIs REST (`\\`, `:`, `*`, `?`, `"`, `<`, `>`, `|`) en los nombres de archivos o directorios.
 
 ---
 

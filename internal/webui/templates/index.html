@@ -4,6 +4,7 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Movistar & O2 WebDAV Proxy (Go)</title>
+    <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'%3E%3Crect width='100' height='100' rx='20' fill='%232563eb'/%3E%3Cpath d='M25 58h50a15 15 0 0 0 0-30 22 22 0 0 0-42-5 18 18 0 0 0-8 35z' fill='white'/%3E%3C/svg%3E">
     <script>
         // Tema: el elegido con el botón (guardado en el navegador) o, si no hay, el del sistema.
         // Se aplica antes de pintar para evitar el destello blanco al cargar en modo oscuro.
@@ -70,14 +71,14 @@
 </head>
 <body class="p-4 sm:p-6 max-w-5xl mx-auto text-slate-800">
     <!-- Header -->
-    <header class="flex flex-wrap items-center justify-between gap-4 mb-8 bg-white p-6 rounded-2xl shadow-sm border border-slate-200">
-        <div class="flex items-center space-x-3">
-            <div class="w-10 h-10 rounded-xl bg-gradient-to-tr from-blue-600 to-indigo-600 flex items-center justify-center shadow-md shadow-blue-500/20 font-bold text-white text-lg">
+    <header class="flex flex-col sm:flex-row sm:items-center justify-between gap-4 mb-8 bg-white p-5 sm:p-6 rounded-2xl shadow-sm border border-slate-200">
+        <div class="flex items-center space-x-3 min-w-0">
+            <div class="w-10 h-10 rounded-xl bg-gradient-to-tr from-blue-600 to-indigo-600 flex items-center justify-center shadow-md shadow-blue-500/20 font-bold text-white text-lg flex-shrink-0">
                 ☁
             </div>
-            <div>
-                <div class="flex items-center space-x-2">
-                    <h1 id="app-title-header" class="text-2xl font-bold text-slate-900 tracking-tight">
+            <div class="min-w-0">
+                <div class="flex flex-wrap items-center gap-2">
+                    <h1 id="app-title-header" class="text-xl sm:text-2xl font-bold text-slate-900 tracking-tight">
                         Movistar WebDAV Proxy
                     </h1>
                     <span id="provider-badge" class="text-xs font-mono font-bold uppercase tracking-wider px-2 py-0.5 bg-blue-100 text-blue-800 rounded-md border border-blue-200">Movistar</span>
@@ -86,13 +87,18 @@
                 <p class="text-xs text-slate-500 mt-0.5">Proxy WebDAV nativo de alto rendimiento para Duplicati & HyperBackup</p>
             </div>
         </div>
-        <div class="flex items-center space-x-3">
+        <div class="flex items-center space-x-2 sm:space-x-2.5 flex-shrink-0">
             <button onclick="toggleTheme()" id="theme-toggle" class="px-3 py-1.5 bg-slate-100 hover:bg-slate-200 text-slate-700 font-semibold rounded-full text-xs transition border border-slate-200" title="Cambiar entre modo claro y oscuro">🌙</button>
-            <button onclick="openTelegramModal()" id="telegram-header-btn" class="px-3.5 py-1.5 bg-slate-100 hover:bg-slate-200 text-slate-700 font-semibold rounded-full text-xs flex items-center space-x-1.5 transition border border-slate-200" title="Configurar alertas Telegram">
+            <button onclick="openTelegramModal()" id="telegram-header-btn" class="px-3 py-1.5 bg-slate-100 hover:bg-slate-200 text-slate-700 font-semibold rounded-full text-xs flex items-center space-x-1.5 transition border border-slate-200" title="Configurar alertas Telegram">
                 <span>✈️</span>
                 <span id="telegram-status-label">Telegram</span>
             </button>
-            <span id="proxy-status" class="px-3.5 py-1.5 bg-slate-100 text-slate-600 font-semibold rounded-full text-xs">⚪ Comprobando...</span>
+            <span id="proxy-status" class="px-3 py-1.5 bg-slate-100 text-slate-600 font-semibold rounded-full text-xs">⚪ Comprobando...</span>
+            <button onclick="logout()" id="logout-btn" class="w-8 h-8 rounded-full bg-slate-100 hover:bg-rose-50 text-slate-500 hover:text-rose-600 hover:border-rose-200 border border-slate-200 flex items-center justify-center transition shadow-sm" title="Cerrar sesión" aria-label="Cerrar sesión">
+                <svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M17 16l4-4m0 0l-4-4m4 4H7m6 4v1a3 3 0 01-3 3H6a3 3 0 01-3-3V7a3 3 0 013-3h4a3 3 0 013 3v1" />
+                </svg>
+            </button>
         </div>
     </header>
 
@@ -145,13 +151,6 @@
                     <input type="text" id="phone" placeholder="Ej: 611223344" class="w-full px-3 py-2 bg-slate-50 border border-slate-200 rounded-lg text-sm outline-none focus:border-blue-500 focus:ring-1 focus:ring-blue-500 font-mono">
                 </div>
 
-                <div id="device-info-box" class="hidden mb-4 p-3 bg-blue-50 border border-blue-100 rounded-xl text-xs text-blue-900 space-y-1">
-                    <div class="font-semibold flex items-center">
-                        <span class="mr-1">✔</span> Cliente Oficial de Escritorio Registrado (Windows):
-                    </div>
-                    <div class="font-mono text-[11px] text-blue-700 break-all" id="device-id-text">Device ID: -</div>
-                    <div class="text-[11px] text-blue-600">Tokens permanentes OAuth2 activos. Inmune a desconexiones al iniciar sesión en otros dispositivos.</div>
-                </div>
             </div>
 
             <div class="pt-4 border-t border-slate-100 mt-2 flex items-center space-x-2">
@@ -173,12 +172,8 @@
 
                 <div class="bg-slate-50 border border-slate-200 rounded-xl p-3 mb-4 text-xs space-y-1.5">
                     <div class="flex justify-between text-slate-600">
-                        <span class="font-medium">Puerto WebDAV interno:</span>
-                        <span class="font-mono font-semibold">8080 (host: 5050)</span>
-                    </div>
-                    <div class="flex justify-between text-slate-600">
-                        <span class="font-medium">Motor de Ejecución:</span>
-                        <span class="font-semibold text-emerald-700">Go Nativo (Zero-Copy Streaming)</span>
+                        <span class="font-medium">Puerto WebDAV (host):</span>
+                        <span id="webdav-host-port" class="font-mono font-semibold">5050</span>
                     </div>
                     <div class="flex justify-between text-slate-600">
                         <span class="font-medium">Espacio en la Nube:</span>
@@ -385,8 +380,6 @@
         const stopBtn = document.getElementById('stopBtn');
         const terminal = document.getElementById('terminal');
         const statusBadge = document.getElementById('proxy-status');
-        const deviceInfoBox = document.getElementById('device-info-box');
-        const deviceIdText = document.getElementById('device-id-text');
         const oauthModal = document.getElementById('oauthModal');
         const oauthLinkBtn = document.getElementById('oauthLinkBtn');
         const oauthInputCode = document.getElementById('oauthInputCode');
@@ -803,11 +796,8 @@
                         if (tgChat) tgChat.value = data.telegram_chat_id;
                     }
                     if (data.has_credentials || data.has_device_token) {
-                        deviceInfoBox.classList.remove('hidden');
-                        deviceIdText.textContent = 'Device ID: ' + (data.device_id || 'fol-Windows');
                         loadStorageInfo(phone);
                     } else {
-                        deviceInfoBox.classList.add('hidden');
                         const storageEl = document.getElementById('cloud-storage-used');
                         if (storageEl) storageEl.textContent = '- / -';
                         const maxFileEl = document.getElementById('cluster-max-file');
@@ -837,7 +827,23 @@
         async function checkStatus() {
             try {
                 const res = await fetch('/status');
+                if (res.status === 401) {
+                    window.location.href = '/login';
+                    return;
+                }
                 const data = await res.json();
+                const logoutBtn = document.getElementById('logout-btn');
+                if (logoutBtn && typeof data.auth_enabled === 'boolean') {
+                    if (data.auth_enabled) {
+                        logoutBtn.classList.remove('hidden');
+                    } else {
+                        logoutBtn.classList.add('hidden');
+                    }
+                }
+                const webdavPort = document.getElementById('webdav-host-port');
+                if (webdavPort && data.webdav_host_port) {
+                    webdavPort.textContent = data.webdav_host_port;
+                }
                 if (data.status === 'running') {
                     startBtn.disabled = true;
                     stopBtn.disabled = false;
@@ -1075,7 +1081,6 @@
                 if (data.status === 'ok') {
                     phoneInput.value = '';
                     localStorage.removeItem('mc_phone');
-                    deviceInfoBox.classList.add('hidden');
                     const storageEl = document.getElementById('cloud-storage-used');
                     if (storageEl) storageEl.textContent = '- / -';
                     const maxFileEl = document.getElementById('cluster-max-file');
@@ -1197,6 +1202,12 @@
             } else {
                 fallbackCopy(text);
             }
+        }
+
+        function logout() {
+            fetch('/logout', { method: 'POST' }).finally(() => {
+                window.location.href = '/login';
+            });
         }
     </script>
 </body>
