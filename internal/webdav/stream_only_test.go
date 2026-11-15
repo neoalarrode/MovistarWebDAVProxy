@@ -116,3 +116,58 @@ func TestStreamOnly_DefaultKeepsSpool(t *testing.T) {
 		t.Fatal("WEBDAV_UPLOAD_SPOOL=FALSE debe desactivarla")
 	}
 }
+
+// Sin copia local, la subida a la nube no se abre hasta tener el búfer inicial
+// (WEBDAV_BUFFER_MB) en memoria: con los primeros KB todavía no hay petición a SAPI.
+func TestStreamOnly_WaitsForInitialBuffer(t *testing.T) {
+	t.Setenv("WEBDAV_UPLOAD_SPOOL", "false")
+	t.Setenv("WEBDAV_BUFFER_MB", "1")
+	var uploads int32
+	var mu sync.Mutex
+	mock := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/sapi/upload" {
+			mu.Lock()
+			uploads++
+			mu.Unlock()
+			_, _ = io.Copy(io.Discard, r.Body)
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = io.WriteString(w, `{"data":{"id":"777","name":"trozo.bin"}}`)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = io.WriteString(w, `{"data":{"folders":[{"id":100,"name":"Root","parentid":0,"magic":true}]}}`)
+	}))
+	t.Cleanup(mock.Close)
+	client, err := sapi.NewClient(config.AccountConfig{Provider: "movistar", Phone: "612345678", AccessToken: "a", RefreshToken: "r", ValidationKey: "vk"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	client.SetBaseURLs(mock.URL+"/sapi", mock.URL)
+	mfs := NewMovistarFS(client)
+	w := NewWebDAVFileWriter(mfs, "/trozo.bin", "trozo.bin", 100, "")
+	w.guard = &uploadGuard{expected: 3 << 20}
+
+	if _, err := w.Write(make([]byte, 32<<10)); err != nil {
+		t.Fatal(err)
+	}
+	if w.streamOnly || w.streamDone != nil {
+		t.Fatal("con 32 KB no debe abrirse todavía la subida a la nube")
+	}
+	if _, err := w.Write(make([]byte, 1<<20)); err != nil {
+		t.Fatal(err)
+	}
+	if !w.streamOnly || w.streamDone == nil {
+		t.Fatal("al pasar del búfer inicial debe empezar la subida en flujo")
+	}
+	if _, err := w.Write(make([]byte, 3<<20-(32<<10)-(1<<20))); err != nil {
+		t.Fatal(err)
+	}
+	if err := w.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	if uploads != 1 {
+		t.Errorf("subidas a SAPI = %d, esperada 1", uploads)
+	}
+}

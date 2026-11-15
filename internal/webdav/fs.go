@@ -2373,9 +2373,13 @@ func (w *WebDAVFileWriter) Write(p []byte) (n int, err error) {
 	}
 
 	rambufMax := GetUploadRAMBufferMaxBytes()
-	overRAM := w.buf != nil && (w.buf.Len()+len(p) > rambufMax || (w.guard != nil && w.guard.expected > int64(rambufMax)))
+	// Sin copia local, la subida a la nube no se abre hasta tener rambufMax bytes en
+	// memoria (32 MB por defecto): si el cliente tarda en empezar a enviar (p. ej. un
+	// origen lento al abrir el archivo), el servidor de subida no ve una conexión sin
+	// datos y no la corta con 408 al arrancar.
+	overRAM := w.buf != nil && w.buf.Len()+len(p) > rambufMax
 	if !w.streamOnly && w.tmpFile == nil && overRAM && !uploadSpoolEnabled() && w.canStream() {
-		// Sin copia local: lo recibido hasta ahora va al flujo y el resto directo.
+		// Lo recibido hasta ahora va al flujo y el resto directo.
 		var initialBytes []byte
 		if w.buf.Len() > 0 {
 			initialBytes = append([]byte(nil), w.buf.Bytes()...)
@@ -2397,7 +2401,9 @@ func (w *WebDAVFileWriter) Write(p []byte) (n int, err error) {
 		}
 		return len(p), nil
 	}
-	if w.tmpFile == nil && (w.buf.Len()+len(p) > rambufMax || (w.guard != nil && w.guard.expected > int64(rambufMax))) {
+	// Con copia local, o si la subida no puede ir en flujo (sin tamaño anunciado,
+	// archivos de control), lo que no cabe en RAM va a un temporal.
+	if w.tmpFile == nil && (uploadSpoolEnabled() || !w.canStream()) && (w.buf.Len()+len(p) > rambufMax || (w.guard != nil && w.guard.expected > int64(rambufMax))) {
 		tmpDir := getUploadTempDir()
 		tmp, err := os.CreateTemp(tmpDir, "webdav_upload_*")
 		if err != nil {
