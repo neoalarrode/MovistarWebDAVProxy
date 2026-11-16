@@ -49,6 +49,17 @@ func shouldRenew(now, expires, lastTry time.Time, remember bool, before time.Dur
 	return expires.Sub(now) < before
 }
 
+// renewDue decide si renovar ahora. Además de antes de la caducidad, en cuanto la
+// sesión deja de valer (401) aunque la cookie JSESSIONID aún no haya caducado:
+// Movistar puede invalidarla antes de tiempo en el servidor, y la PLC sirve igual
+// para reentrar. Sin esto el proxy se quedaba en «no iniciada» hasta un login manual.
+func renewDue(now, expires, lastTry time.Time, remember, loggedIn bool, before time.Duration) bool {
+	if !loggedIn && remember {
+		expires = now
+	}
+	return shouldRenew(now, expires, lastTry, remember, before)
+}
+
 // sessionCookies lee la caducidad de JSESSIONID y si existe la PLC.
 func sessionCookies(tab context.Context) (expires time.Time, remember bool, err error) {
 	res, err := chromedp.Call(tab, network.GetCookies, network.GetCookiesParams{URLs: []string{PortalURL + "/"}})
@@ -94,11 +105,7 @@ func (s *Session) renewLoop() {
 		s.stateMu.RLock()
 		lastTry := s.lastRenewTry
 		s.stateMu.RUnlock()
-		// También sin sesión: si caducó, la PLC sirve igual para reentrar.
-		if !s.LoggedIn() && remember && expires.IsZero() {
-			expires = time.Now()
-		}
-		if !shouldRenew(time.Now(), expires, lastTry, remember, renewBefore()) {
+		if !renewDue(time.Now(), expires, lastTry, remember, s.LoggedIn(), renewBefore()) {
 			continue
 		}
 		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
