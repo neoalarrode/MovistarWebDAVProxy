@@ -6,7 +6,9 @@ import (
 	"context"
 	"encoding/json"
 	"net/http"
+	"strings"
 	"sync"
+	"time"
 
 	"github.com/chromedp/cdproto/input"
 	"github.com/chromedp/cdproto/page"
@@ -137,8 +139,29 @@ func (v *LoginView) serveStatus(w http.ResponseWriter, r *http.Request) {
 }
 
 func (v *LoginView) serveIndex(w http.ResponseWriter, r *http.Request) {
+	v.openLoginPage()
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	_, _ = w.Write([]byte(loginHTML))
+}
+
+// openLoginPage lleva la pestaña a la página de inicio de sesión si no hay sesión
+// y no se está ya en ella (o en el login de Telefónica). La portada de la web, sin
+// sesión válida, puede quedarse cargando (logo girando) sin enseñar el login.
+func (v *LoginView) openLoginPage() {
+	if v.LoggedIn == nil || v.LoggedIn() {
+		return
+	}
+	tab, err := v.tab()
+	if err != nil {
+		return
+	}
+	ctx, cancel := context.WithTimeout(tab, 20*time.Second)
+	defer cancel()
+	href, err := chromedp.Run(ctx, chromedp.Evaluate[string]("location.href"))
+	if err != nil || strings.Contains(href, "/login") || strings.Contains(href, "t3.movistar.es") || strings.Contains(href, "telefonica.es") {
+		return
+	}
+	_ = chromedp.Do(ctx, chromedp.Navigate(PortalURL+"/login"))
 }
 
 const loginHTML = `<!doctype html>
