@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/chromedp/cdproto/network"
+	"github.com/chromedp/cdproto/storage"
 	"github.com/chromedp/chromedp"
 
 	"movistar-webdav-proxy/internal/logger"
@@ -168,16 +169,17 @@ func (s *Session) Renew(ctx context.Context) error {
 		return nil
 	}
 	s.setLoggedIn(false)
-	// Con una PLC invalidada la web se queda cargando (logo girando) y no llega a
-	// mostrar el login. Se borra y se abre /login para que la vista remota del
-	// panel enseñe la pantalla de inicio de sesión.
-	for _, name := range []string{rememberCookie, sessionCookie} {
-		_, _ = chromedp.Call(tab, network.DeleteCookies, network.DeleteCookiesParams{Name: name, Domain: "micloud.movistar.es", Path: "/"})
-		_, _ = chromedp.Call(tab, network.DeleteCookies, network.DeleteCookiesParams{Name: name, Domain: ".micloud.movistar.es", Path: "/"})
+	// Con la sesión invalidada por Movistar la web se queda cargando (logo girando)
+	// y no llega a mostrar el login: no basta con borrar PLC y JSESSIONID, también
+	// guarda estado en el almacenamiento del sitio. Se borra todo lo de la web
+	// (cookies, localStorage, IndexedDB…) y se abre /login para que la vista remota
+	// del panel enseñe la pantalla de inicio de sesión.
+	if _, err := chromedp.Call(tab, storage.ClearDataForOrigin, storage.ClearDataForOriginParams{Origin: PortalURL, StorageTypes: "all"}); err != nil {
+		logger.Log("[WebSession] ⚠️ No se pudo borrar el estado de la web: %v", err)
 	}
 	_ = chromedp.Do(tab, chromedp.Navigate(PortalURL+"/login"))
 	s.stateMu.Lock()
 	s.remember = false
 	s.stateMu.Unlock()
-	return errors.New("la web no reentró con la PLC (caducada o invalidada); se ha borrado y la página de inicio de sesión queda lista en el panel")
+	return errors.New("la web no reentró con la PLC (caducada o invalidada); se ha borrado el estado de la web y la página de inicio de sesión queda lista en el panel")
 }
