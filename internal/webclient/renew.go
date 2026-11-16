@@ -168,5 +168,16 @@ func (s *Session) Renew(ctx context.Context) error {
 		return nil
 	}
 	s.setLoggedIn(false)
-	return errors.New("la web no reentró con la PLC (¿caducada o invalidada?): hay que iniciar sesión desde el panel")
+	// Con una PLC invalidada la web se queda cargando (logo girando) y no llega a
+	// mostrar el login. Se borra y se abre /login para que la vista remota del
+	// panel enseñe la pantalla de inicio de sesión.
+	for _, name := range []string{rememberCookie, sessionCookie} {
+		_, _ = chromedp.Call(tab, network.DeleteCookies, network.DeleteCookiesParams{Name: name, Domain: "micloud.movistar.es", Path: "/"})
+		_, _ = chromedp.Call(tab, network.DeleteCookies, network.DeleteCookiesParams{Name: name, Domain: ".micloud.movistar.es", Path: "/"})
+	}
+	_ = chromedp.Do(tab, chromedp.Navigate(PortalURL+"/login"))
+	s.stateMu.Lock()
+	s.remember = false
+	s.stateMu.Unlock()
+	return errors.New("la web no reentró con la PLC (caducada o invalidada); se ha borrado y la página de inicio de sesión queda lista en el panel")
 }
