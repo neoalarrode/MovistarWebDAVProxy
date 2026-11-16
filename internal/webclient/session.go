@@ -144,12 +144,27 @@ func (s *Session) start() error {
 
 	actx, acancel := chromedp.NewExecAllocator(context.Background(), opts...)
 	ctx, cancel := chromedp.NewContext(actx)
+	ua, err := chromedp.Run(ctx, chromedp.Evaluate[string]("navigator.userAgent"))
+	if err != nil {
+		cancel()
+		acancel()
+		return fmt.Errorf("arrancar Chromium: %w", err)
+	}
+	// Sin pantalla, Chromium se anuncia como «HeadlessChrome» y la web de Movistar
+	// (o su protección anti-bots) puede quedarse cargando sin mostrar el login. Se
+	// relanza con el mismo User-Agent de un Chrome normal.
+	if strings.Contains(ua, "HeadlessChrome") {
+		ua = strings.ReplaceAll(ua, "HeadlessChrome", "Chrome")
+		cancel()
+		acancel()
+		actx, acancel = chromedp.NewExecAllocator(context.Background(), append(opts, chromedp.UserAgent(ua))...)
+		ctx, cancel = chromedp.NewContext(actx)
+	}
 	if err := chromedp.Do(ctx, chromedp.Navigate(PortalURL+"/")); err != nil {
 		cancel()
 		acancel()
 		return fmt.Errorf("arrancar Chromium: %w", err)
 	}
-	ua, _ := chromedp.Run(ctx, chromedp.Evaluate[string]("navigator.userAgent"))
 
 	s.mu.Lock()
 	s.allocCancel, s.ctx, s.cancel, s.userAgent = acancel, ctx, cancel, ua
