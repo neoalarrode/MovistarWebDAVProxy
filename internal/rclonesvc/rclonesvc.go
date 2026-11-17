@@ -29,6 +29,20 @@ type Options struct {
 	Addr        string // dirección del WebDAV descifrado (WEBDAV_DECRYPTED_ADDR, por defecto :8081)
 	CacheMode   string // --vfs-cache-mode (WEBDAV_DECRYPTED_CACHE_MODE, por defecto off: subida directa)
 	ConfigDir   string // dónde escribir rclone.conf (tmpfs; por defecto /tmp/rclone-proxy)
+
+	// Montaje FUSE de los archivos descifrados (opcional), para que el sistema los
+	// vea como una carpeta normal (Emby, Samba...). Requiere /dev/fuse y SYS_ADMIN.
+	MountPath  string   // WEBDAV_MOUNT_PATH, p. ej. /mnt/emby_cloud
+	MountArgs  []string // WEBDAV_MOUNT_ARGS (sustituye a las opciones por defecto)
+	MountCache string   // WEBDAV_MOUNT_CACHE_DIR (por defecto /app/cache/rclone)
+}
+
+// DefaultMountArgs son las opciones del montaje probado en producción.
+func DefaultMountArgs(cacheDir string) []string {
+	return []string{"--allow-other", "--vfs-cache-mode", "writes", "--vfs-cache-max-size", "30G", "--vfs-cache-max-age", "1h",
+		"--cache-dir", cacheDir, "--vfs-read-chunk-size", "32M", "--vfs-read-chunk-size-limit", "256M",
+		"--dir-cache-time", "1000h", "--attr-timeout", "1h", "--umask", "022",
+		"--rc", "--rc-addr", "127.0.0.1:5573", "--rc-no-auth"}
 }
 
 // Service vigila el proceso de rclone.
@@ -38,6 +52,9 @@ type Service struct {
 	cancel  context.CancelFunc
 	running bool
 	lastErr string
+
+	mountRunning bool
+	mountErr     string
 }
 
 // New crea el servicio con valores por defecto.
@@ -54,6 +71,9 @@ func New(o Options) *Service {
 	if o.ConfigDir == "" {
 		o.ConfigDir = filepath.Join(os.TempDir(), "rclone-proxy")
 	}
+	if o.MountCache == "" {
+		o.MountCache = "/app/cache/rclone"
+	}
 	return &Service{opts: o}
 }
 
@@ -61,7 +81,8 @@ func New(o Options) *Service {
 func (s *Service) Status() map[string]interface{} {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	return map[string]interface{}{"running": s.running, "addr": s.opts.Addr, "cache_mode": s.opts.CacheMode, "error": s.lastErr}
+	return map[string]interface{}{"running": s.running, "addr": s.opts.Addr, "cache_mode": s.opts.CacheMode, "error": s.lastErr,
+		"mount_path": s.opts.MountPath, "mount_running": s.mountRunning, "mount_error": s.mountErr}
 }
 
 // Restart (re)arranca rclone con la clave actual; sin clave, lo detiene.
@@ -81,6 +102,9 @@ func (s *Service) Restart() {
 	s.cancel = cancel
 	s.mu.Unlock()
 	go s.supervise(ctx, *c)
+	if s.opts.MountPath != "" {
+		go s.superviseMount(ctx, *c)
+	}
 }
 
 // Stop detiene rclone.
@@ -186,4 +210,66 @@ func pipeLog(r io.Reader) {
 			logger.Log("[Descifrado] %s", line)
 		}
 	}
+}
+
+// mountArgs son los argumentos de «rclone mount».
+func (s *Service) mountArgs(conf string) []string {
+	a := []string{"mount", "nube-cifrada:", s.opts.MountPath, "--config", conf}
+	if len(s.opts.MountArgs) > 0 {
+		return append(a, s.opts.MountArgs...)
+	}
+	return append(a, DefaultMountArgs(s.opts.MountCache)...)
+}
+
+// superviseMount mantiene montado WEBDAV_MOUNT_PATH con el rclone interno.
+func (s *Service) superviseMount(ctx context.Context, c vault.Crypt) {
+	backoff := 5 * time.Second
+	for ctx.Err() == nil {
+		conf, err := s.writeConfig(c)
+		if err != nil {
+			s.setMount(false, err.Error())
+			return
+		}
+		_ = os.MkdirAll(s.opts.MountPath, 0o755)
+		_ = os.MkdirAll(s.opts.MountCache, 0o700)
+		// Un montaje anterior colgado (p. ej. tras un reinicio brusco) impide montar.
+		_ = exec.Command("fusermount3", "-uz", s.opts.MountPath).Run()
+		cmd := exec.CommandContext(ctx, s.opts.Binary, s.mountArgs(conf)...)
+		cmd.Env = append(os.Environ(), "RCLONE_CONFIG="+conf)
+		out, _ := cmd.StdoutPipe()
+		cmd.Stderr = cmd.Stdout
+		if err := cmd.Start(); err != nil {
+			s.setMount(false, "no se pudo arrancar rclone mount: "+err.Error())
+			return
+		}
+		s.setMount(true, "")
+		logger.Log("[Descifrado] 📂 Archivos descifrados montados en %s", s.opts.MountPath)
+		go pipeLog(out)
+		start := time.Now()
+		err = cmd.Wait()
+		_ = exec.Command("fusermount3", "-uz", s.opts.MountPath).Run()
+		if ctx.Err() != nil {
+			s.setMount(false, "")
+			return
+		}
+		s.setMount(false, fmt.Sprintf("rclone mount terminó: %v", err))
+		logger.Log("[Descifrado] ⚠️ rclone mount terminó (%v); se vuelve a montar en %s", err, backoff)
+		if time.Since(start) > time.Minute {
+			backoff = 5 * time.Second
+		}
+		select {
+		case <-ctx.Done():
+			return
+		case <-time.After(backoff):
+		}
+		if backoff < time.Minute {
+			backoff *= 2
+		}
+	}
+}
+
+func (s *Service) setMount(running bool, errMsg string) {
+	s.mu.Lock()
+	s.mountRunning, s.mountErr = running, errMsg
+	s.mu.Unlock()
 }

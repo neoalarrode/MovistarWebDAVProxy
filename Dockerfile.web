@@ -16,7 +16,7 @@ RUN CGO_ENABLED=0 GOOS=linux go build -trimpath -ldflags="-s -w -X movistar-webd
 FROM debian:trixie-slim
 
 RUN apt-get update && \
-    apt-get install -y --no-install-recommends chromium fonts-dejavu-core fonts-liberation ca-certificates tzdata gosu && \
+    apt-get install -y --no-install-recommends fuse3 chromium fonts-dejavu-core fonts-liberation ca-certificates tzdata gosu && \
     rm -rf /var/lib/apt/lists/* && \
     ln -s "$(command -v gosu)" /usr/local/bin/su-exec && \
     useradd -m -u 10001 app && \

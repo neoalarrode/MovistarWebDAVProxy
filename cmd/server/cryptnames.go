@@ -54,6 +54,9 @@ func setupCrypt(webdavPort string) *rclonesvc.Service {
 		Pass:        pass,
 		Addr:        os.Getenv("WEBDAV_DECRYPTED_ADDR"),
 		CacheMode:   os.Getenv("WEBDAV_DECRYPTED_CACHE_MODE"),
+		MountPath:   strings.TrimSpace(os.Getenv("WEBDAV_MOUNT_PATH")),
+		MountArgs:   strings.Fields(os.Getenv("WEBDAV_MOUNT_ARGS")),
+		MountCache:  strings.TrimSpace(os.Getenv("WEBDAV_MOUNT_CACHE_DIR")),
 	})
 	if vault.Current() != nil {
 		svc.Restart()

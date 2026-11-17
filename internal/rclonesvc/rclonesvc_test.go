@@ -36,3 +36,17 @@ func TestWriteConfig_ThreeRemotesAndObscuredSecrets(t *testing.T) {
 		t.Errorf("permisos %v, esperados 0600", fi.Mode().Perm())
 	}
 }
+
+// El montaje usa por defecto las mismas opciones que el de producción.
+func TestMountArgs_DefaultsMatchProduction(t *testing.T) {
+	s := New(Options{MountPath: "/mnt/emby_cloud"})
+	got := strings.Join(s.mountArgs("/tmp/r.conf"), " ")
+	want := "mount nube-cifrada: /mnt/emby_cloud --config /tmp/r.conf --allow-other --vfs-cache-mode writes --vfs-cache-max-size 30G --vfs-cache-max-age 1h --cache-dir /app/cache/rclone --vfs-read-chunk-size 32M --vfs-read-chunk-size-limit 256M --dir-cache-time 1000h --attr-timeout 1h --umask 022 --rc --rc-addr 127.0.0.1:5573 --rc-no-auth"
+	if got != want {
+		t.Errorf("args:\n%s\nesperado:\n%s", got, want)
+	}
+	s2 := New(Options{MountPath: "/x", MountArgs: []string{"--vfs-cache-mode", "off"}})
+	if g := strings.Join(s2.mountArgs("c"), " "); g != "mount nube-cifrada: /x --config c --vfs-cache-mode off" {
+		t.Errorf("WEBDAV_MOUNT_ARGS no sustituye: %s", g)
+	}
+}

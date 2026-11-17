@@ -23,6 +23,15 @@ can_access_as_app() {
 # Si el host (ej. Synology DSM o permisos estrictos en volúmenes montados) bloquea chown o
 # algún fichero/directorio sigue sin permisos de lectura/escritura para "app",
 # mantenemos la ejecución como root para evitar fallos catastróficos en runtime (principio de resiliencia).
+# Con WEBDAV_MOUNT_PATH el proxy monta los archivos descifrados con FUSE (rclone
+# mount): eso requiere seguir como root dentro del contenedor (y en compose:
+# /dev/fuse, cap_add SYS_ADMIN y el volumen del punto de montaje con rshared).
+if [ "$(id -u)" = "0" ] && [ -n "$WEBDAV_MOUNT_PATH" ]; then
+    mkdir -p "$TOKENS_DIR"
+    chmod 700 "$TOKENS_DIR" 2>/dev/null || true
+    exec /app/movistar-proxy "$@"
+fi
+
 if [ "$(id -u)" = "0" ]; then
     mkdir -p "$TOKENS_DIR"
     chown -R app:app "$TOKENS_DIR" 2>/dev/null || true
