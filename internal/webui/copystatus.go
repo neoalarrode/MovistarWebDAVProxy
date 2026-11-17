@@ -388,7 +388,11 @@ func fillFromProxy(st *copyStatus) {
 	var up, rd, q []copyTransfer
 	var upSpeed, rdSpeed float64
 	for _, t := range webdav.Transfers.Snapshot() {
-		ct := copyTransfer{Name: strings.TrimPrefix(t.Path, "/"), Size: t.Size, Bytes: t.Bytes, Percentage: t.Percentage,
+		name := t.Display
+		if name == "" {
+			name = strings.TrimPrefix(t.Path, "/")
+		}
+		ct := copyTransfer{Name: name, Size: t.Size, Bytes: t.Bytes, Percentage: t.Percentage,
 			Speed: t.Speed, ETA: t.ETA, Idle: t.Idle, IdleSeconds: t.IdleSeconds}
 		switch t.Kind {
 		case "upload":

@@ -7,6 +7,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 )
 
@@ -19,6 +20,7 @@ import (
 type TransferInfo struct {
 	Kind        string  `json:"kind"` // upload | download
 	Path        string  `json:"path"`
+	Display     string  `json:"display,omitempty"` // nombre legible (descifrado) si se conoce
 	Size        int64   `json:"size"`
 	Bytes       int64   `json:"bytes"` // subidas: enviados; descargas: posición alcanzada en el archivo
 	Percentage  int     `json:"percentage"`
@@ -54,6 +56,20 @@ type TransferTracker struct {
 // NewTransferTracker crea un registro; las descargas terminadas se muestran keep más.
 func NewTransferTracker(keep time.Duration) *TransferTracker {
 	return &TransferTracker{items: map[string]*transfer{}, keep: keep, now: time.Now}
+}
+
+// displayName convierte una ruta en su nombre legible (p. ej. descifrando rclone
+// crypt). Vacío si no se sabe.
+var displayName atomic.Value // func(string) string
+
+// SetDisplayName fija cómo mostrar las rutas en el panel.
+func SetDisplayName(f func(string) string) { displayName.Store(f) }
+
+func display(p string) string {
+	if f, ok := displayName.Load().(func(string) string); ok && f != nil {
+		return f(p)
+	}
+	return ""
 }
 
 // Transfers registra las transferencias de este proceso.
@@ -152,7 +168,7 @@ func (t *TransferTracker) Snapshot() []TransferInfo {
 			delete(t.items, key)
 			continue
 		}
-		info := TransferInfo{Kind: tr.kind, Path: tr.path, Size: tr.size, Bytes: tr.position}
+		info := TransferInfo{Kind: tr.kind, Path: tr.path, Display: display(tr.path), Size: tr.size, Bytes: tr.position}
 		if tr.size > 0 {
 			info.Percentage = int(tr.position * 100 / tr.size)
 			if info.Percentage > 100 {
