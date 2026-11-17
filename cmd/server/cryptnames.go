@@ -6,6 +6,7 @@ import (
 
 	"movistar-webdav-proxy/internal/cryptname"
 	"movistar-webdav-proxy/internal/logger"
+	"movistar-webdav-proxy/internal/vault"
 	"movistar-webdav-proxy/internal/webdav"
 )
 
@@ -15,9 +16,26 @@ import (
 //	RCLONE_CRYPT_PASSWORD / RCLONE_CRYPT_PASSWORD2  las de rclone.conf (ofuscadas)
 //	RCLONE_CRYPT_OBSCURED=false                      si se dan en claro
 //	RCLONE_CRYPT_ROOT                                carpeta WebDAV del remoto crypt (p. ej. /emby)
+//
+// Sin esas variables usa la clave guardada en el proxy (TOKENS_DIR/crypt.json).
 func setupCryptNames() {
 	pass := strings.TrimSpace(os.Getenv("RCLONE_CRYPT_PASSWORD"))
 	if pass == "" {
+		c, err := vault.Load()
+		if err != nil {
+			logger.Log("[WebDAV] ⚠️ No se pudo leer la clave de cifrado guardada: %v", err)
+			return
+		}
+		if c == nil {
+			return
+		}
+		names, err := cryptname.New(c.Password, c.Password2)
+		if err != nil {
+			logger.Log("[WebDAV] ⚠️ No se pudo preparar el descifrado de nombres: %v", err)
+			return
+		}
+		webdav.SetDisplayName(func(p string) string { return names.DecryptPath(p, c.Root) })
+		logger.Log("[WebDAV] 🔓 Nombres de rclone crypt descifrados en el panel con la clave guardada (raíz %q)", "/"+strings.Trim(c.Root, "/"))
 		return
 	}
 	pass2 := strings.TrimSpace(os.Getenv("RCLONE_CRYPT_PASSWORD2"))

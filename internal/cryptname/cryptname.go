@@ -6,6 +6,7 @@ package cryptname
 import (
 	"crypto/aes"
 	"crypto/cipher"
+	"crypto/rand"
 	"encoding/base32"
 	"encoding/base64"
 	"errors"
@@ -27,6 +28,20 @@ var obscureKey = []byte{
 }
 
 var b32 = base32.HexEncoding.WithPadding(base32.NoPadding)
+
+// Obscure ofusca una contraseña como «rclone obscure» (para escribir rclone.conf).
+func Obscure(plain string) (string, error) {
+	block, err := aes.NewCipher(obscureKey)
+	if err != nil {
+		return "", err
+	}
+	buf := make([]byte, aes.BlockSize+len(plain))
+	if _, err := rand.Read(buf[:aes.BlockSize]); err != nil {
+		return "", err
+	}
+	cipher.NewCTR(block, buf[:aes.BlockSize]).XORKeyStream(buf[aes.BlockSize:], []byte(plain))
+	return base64.RawURLEncoding.EncodeToString(buf), nil
+}
 
 // Reveal deshace la ofuscación de rclone (rclone reveal).
 func Reveal(obscured string) (string, error) {
