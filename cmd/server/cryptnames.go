@@ -3,17 +3,20 @@ package main
 import (
 	"os"
 	"strings"
+	"sync"
 
+	"movistar-webdav-proxy/internal/cryptname"
 	"movistar-webdav-proxy/internal/logger"
 	"movistar-webdav-proxy/internal/rclonesvc"
 	"movistar-webdav-proxy/internal/vault"
 	"movistar-webdav-proxy/internal/webdav"
 )
 
-// prepareVault carga la clave de cifrado guardada en el proxy (internal/vault) o
-// la importa una vez de RCLONE_CRYPT_PASSWORD[2]/RCLONE_CRYPT_ROOT (como en
-// rclone.conf, ofuscadas o en claro). Devuelve si hay clave.
-func prepareVault() bool {
+// prepareVault carga las configuraciones de rclone por carpeta guardadas en el
+// proxy. La primera vez importa la clave de RCLONE_CRYPT_PASSWORD[2]/RCLONE_CRYPT_ROOT
+// (como en rclone.conf, ofuscadas o en claro) o la de crypt.json como configuración
+// de esa carpeta.
+func prepareVault() {
 	if _, err := vault.Load(); err != nil {
 		logger.Log("[Descifrado] ⚠️ %v", err)
 	}
@@ -31,30 +34,44 @@ func prepareVault() bool {
 			}
 		}
 	}
-	return vault.Current() != nil
+	if err := vault.LoadFolders(); err != nil {
+		logger.Log("[Descifrado] ⚠️ %v", err)
+	}
+	for _, f := range vault.Folders() {
+		logger.Log("[Descifrado] 📁 Carpeta «%s» con configuración propia de rclone", f.Name)
+	}
 }
 
-// setupCrypt arranca, si hay clave, el rclone interno que sirve en el puerto WebDAV
-// público los archivos descifrados (sobre el WebDAV en bruto de rawPort) y el
-// descifrado de nombres del panel.
 // internalDecryptedAddr es donde escucha el rclone interno; delante va el WebDAV
 // público del proxy (decryptedGateway).
 const internalDecryptedAddr = "127.0.0.1:8091"
 
+// folderNames guarda el descifrador de nombres de cada carpeta configurada.
+var folderNames sync.Map // nombre de carpeta → *cryptname.Cipher (o nil)
+
+func refreshFolderNames() {
+	folderNames.Range(func(k, _ interface{}) bool { folderNames.Delete(k); return true })
+	for _, f := range vault.Folders() {
+		if n := vault.NamesFor(f); n != nil {
+			folderNames.Store(f.Name, n)
+		}
+	}
+}
+
+// setupCrypt arranca el rclone interno que sirve en el puerto WebDAV público la
+// nube con cada carpeta según su configuración, y el descifrado de nombres del panel.
 func setupCrypt(webdavPort, rawPort string) *rclonesvc.Service {
+	refreshFolderNames()
 	webdav.SetDisplayName(func(p string) string {
-		c := vault.Current()
-		n := vault.Names()
-		if c == nil || n == nil {
-			return ""
-		}
-		// Solo se descifra lo que está dentro de una carpeta marcada como cifrada.
-		for _, project := range c.Projects() {
-			if d := n.DecryptPath(p, project); d != "" {
-				return project + "/" + d
+		var out string
+		folderNames.Range(func(k, v interface{}) bool {
+			if d := v.(*cryptname.Cipher).DecryptPath(p, k.(string)); d != "" {
+				out = k.(string) + "/" + d
+				return false
 			}
-		}
-		return ""
+			return true
+		})
+		return out
 	})
 
 	pass := os.Getenv("WEBDAV_PASSWORD")
@@ -71,8 +88,9 @@ func setupCrypt(webdavPort, rawPort string) *rclonesvc.Service {
 		MountPath:   strings.TrimSpace(os.Getenv("WEBDAV_MOUNT_PATH")),
 		MountArgs:   strings.Fields(os.Getenv("WEBDAV_MOUNT_ARGS")),
 		MountCache:  strings.TrimSpace(os.Getenv("WEBDAV_MOUNT_CACHE_DIR")),
+		OnRestart:   refreshFolderNames,
 	})
-	if vault.Current() != nil {
+	if len(vault.Folders()) > 0 {
 		svc.Restart()
 	}
 	return svc

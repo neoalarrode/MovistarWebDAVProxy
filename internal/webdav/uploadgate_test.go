@@ -106,3 +106,20 @@ func TestQueuedUpload_PromotesToStream(t *testing.T) {
 		t.Errorf("la RAM de la cola debe quedar liberada, quedan %d", queuedRAM.Load())
 	}
 }
+
+func TestBulkPaths(t *testing.T) {
+	done := MarkBulkPath("emby/abc/def")
+	if !isBulkPath("/emby/abc/def-chunk001") || !isBulkPath("/emby/abc/def") || isBulkPath("/emby/abc/otro") {
+		t.Fatal("prefijo de subida masiva mal resuelto")
+	}
+	done2 := MarkBulkPath("/emby/abc/def/")
+	done()
+	done()
+	if !isBulkPath("/emby/abc/def") {
+		t.Fatal("la segunda marca debe seguir activa")
+	}
+	done2()
+	if isBulkPath("/emby/abc/def") {
+		t.Fatal("marca no liberada")
+	}
+}

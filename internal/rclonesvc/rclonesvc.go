@@ -1,7 +1,8 @@
-// Package rclonesvc arranca y vigila un rclone interno que sirve por WebDAV los
-// archivos YA DESCIFRADOS: rclone crypt sobre rclone chunker sobre el WebDAV del
-// propio proxy, con la clave guardada en el proxy (internal/vault). Lo que suba un
-// cliente a este WebDAV se cifra, se trocea y pasa por las colas y límites del proxy.
+// Package rclonesvc arranca y vigila un rclone interno que sirve por WebDAV la nube
+// entera desde la raíz con cada carpeta según su configuración de rclone guardada
+// en el proxy (internal/vault): las que tienen una (crypt, chunker...) se ven ya
+// descifradas, cada una con su clave; el resto, tal cual. Lo que suba un cliente
+// se cifra, se trocea y pasa por las colas y límites del proxy.
 package rclonesvc
 
 import (
@@ -19,6 +20,7 @@ import (
 
 	"movistar-webdav-proxy/internal/cryptname"
 	"movistar-webdav-proxy/internal/logger"
+	"movistar-webdav-proxy/internal/rcloneconf"
 	"movistar-webdav-proxy/internal/vault"
 )
 
@@ -36,6 +38,8 @@ type Options struct {
 	MountPath  string   // WEBDAV_MOUNT_PATH, p. ej. /mnt/emby_cloud
 	MountArgs  []string // WEBDAV_MOUNT_ARGS (sustituye a las opciones por defecto)
 	MountCache string   // WEBDAV_MOUNT_CACHE_DIR (por defecto /app/cache/rclone)
+
+	OnRestart func() // al cambiar las configuraciones (p. ej. recargar los descifradores de nombres)
 }
 
 // DefaultMountArgs son las opciones del montaje probado en producción.
@@ -86,25 +90,23 @@ func (s *Service) Status() map[string]interface{} {
 		"mount_path": s.opts.MountPath, "mount_running": s.mountRunning, "mount_error": s.mountErr}
 }
 
-// Restart (re)arranca rclone con la clave actual; sin clave, lo detiene.
+// Restart (re)arranca rclone con las configuraciones por carpeta actuales.
 func (s *Service) Restart() {
 	s.mu.Lock()
 	if s.cancel != nil {
 		s.cancel()
 		s.cancel = nil
 	}
-	c := vault.Current()
-	if c == nil {
-		s.running, s.lastErr = false, "sin clave de cifrado configurada"
-		s.mu.Unlock()
-		return
+	folders := vault.Folders()
+	if s.opts.OnRestart != nil {
+		s.opts.OnRestart()
 	}
 	ctx, cancel := context.WithCancel(context.Background())
 	s.cancel = cancel
 	s.mu.Unlock()
-	go s.supervise(ctx, *c)
+	go s.supervise(ctx, folders)
 	if s.opts.MountPath != "" {
-		go s.superviseMount(ctx, *c)
+		go s.superviseMount(ctx, folders)
 	}
 }
 
@@ -119,43 +121,42 @@ func (s *Service) Stop() {
 }
 
 // writeConfig escribe un rclone.conf (0600). «nube» es el WebDAV en bruto del
-// proxy; cada carpeta cifrada de la raíz tiene su chunker + crypt; «raiz» las junta
-// (combine) con el resto de carpetas de la raíz tal cual, para servir la nube entera
-// desde la raíz con lo cifrado ya descifrado.
-func (s *Service) writeConfig(c vault.Crypt, topDirs []string) (string, error) {
+// proxy; cada carpeta configurada de la raíz lleva su cadena de rclone (la pegada,
+// enganchada a «nube:<carpeta>»); «raiz» las junta (combine) con el resto de
+// carpetas de la raíz tal cual, para servir la nube entera desde la raíz.
+func (s *Service) writeConfig(folders []vault.Folder, topDirs []string) (string, error) {
 	if err := os.MkdirAll(s.opts.ConfigDir, 0o700); err != nil {
 		return "", err
 	}
-	ob := func(v string) string {
-		if v == "" {
-			return ""
-		}
-		o, _ := cryptname.Obscure(v)
-		return o
+	pass := ""
+	if s.opts.Pass != "" {
+		pass, _ = cryptname.Obscure(s.opts.Pass)
 	}
 	var b strings.Builder
-	fmt.Fprintf(&b, "[nube]\ntype = webdav\nurl = %s\nvendor = owncloud\nuser = %s\npass = %s\n\n", s.opts.UpstreamURL, s.opts.User, ob(s.opts.Pass))
-	// Conviven carpetas cifradas y en claro: las de c.Projects() (las marcadas como
-	// cifradas) se ven descifradas con la clave; el resto de la raíz, tal cual.
-	encrypted := map[string]bool{}
+	fmt.Fprintf(&b, "[nube]\ntype = webdav\nurl = %s\nvendor = owncloud\nuser = %s\npass = %s\n\n", s.opts.UpstreamURL, s.opts.User, pass)
+	configured := map[string]bool{}
 	var upstreams []string
-	for i, p := range c.Projects() {
-		encrypted[p] = true
-		fmt.Fprintf(&b, "[trozos-%d]\ntype = chunker\nremote = nube:%s\nchunk_size = %s\nname_format = %s\ntransactions = %s\nhash_type = none\nmeta_format = simplejson\n\n",
-			i, p, c.ChunkSize, c.NameFormat, c.Transaction)
-		fmt.Fprintf(&b, "[cifrada-%d]\ntype = crypt\nremote = trozos-%d:\nfilename_encryption = standard\ndirectory_name_encryption = true\npassword = %s\n", i, i, ob(c.Password))
-		if c.Password2 != "" {
-			fmt.Fprintf(&b, "password2 = %s\n", ob(c.Password2))
+	for i, f := range folders {
+		ch, err := rcloneconf.Remap(f.Config, f.Top, "nube:"+f.Name, fmt.Sprintf("c%d-", i))
+		if err != nil {
+			logger.Log("[Descifrado] ⚠️ Configuración de «%s» no válida (%v): se sirve tal cual", f.Name, err)
+			continue
 		}
-		b.WriteString("\n")
-		upstreams = append(upstreams, fmt.Sprintf("%q", fmt.Sprintf("%s=cifrada-%d:", p, i)))
+		configured[f.Name] = true
+		b.WriteString(ch.String())
+		upstreams = append(upstreams, fmt.Sprintf("%q", fmt.Sprintf("%s=%s:", f.Name, ch.Top)))
 	}
 	for _, d := range topDirs {
-		if d = strings.Trim(d, "/"); d != "" && !encrypted[d] {
+		if d = strings.Trim(d, "/"); d != "" && !configured[d] {
 			upstreams = append(upstreams, fmt.Sprintf("%q", fmt.Sprintf("%s=nube:%s", d, d)))
 		}
 	}
-	fmt.Fprintf(&b, "[raiz]\ntype = combine\nupstreams = %s\n", strings.Join(upstreams, " "))
+	if len(upstreams) == 0 {
+		// Nube vacía y sin carpetas configuradas: la raíz tal cual.
+		b.WriteString("[raiz]\ntype = alias\nremote = nube:\n")
+	} else {
+		fmt.Fprintf(&b, "[raiz]\ntype = combine\nupstreams = %s\n", strings.Join(upstreams, " "))
+	}
 	path := filepath.Join(s.opts.ConfigDir, "rclone.conf")
 	if err := os.WriteFile(path, []byte(b.String()), 0o600); err != nil {
 		return "", err
@@ -164,8 +165,8 @@ func (s *Service) writeConfig(c vault.Crypt, topDirs []string) (string, error) {
 }
 
 // topDirs lista las carpetas de la raíz de la nube (WebDAV en bruto del proxy).
-func (s *Service) topDirs(ctx context.Context, c vault.Crypt) []string {
-	conf, err := s.writeConfig(c, nil)
+func (s *Service) topDirs(ctx context.Context, folders []vault.Folder) []string {
+	conf, err := s.writeConfig(folders, nil)
 	if err != nil {
 		return nil
 	}
@@ -196,10 +197,10 @@ func (s *Service) args(conf string) []string {
 	return a
 }
 
-func (s *Service) supervise(ctx context.Context, c vault.Crypt) {
+func (s *Service) supervise(ctx context.Context, folders []vault.Folder) {
 	backoff := 2 * time.Second
 	for ctx.Err() == nil {
-		conf, err := s.writeConfig(c, s.topDirs(ctx, c))
+		conf, err := s.writeConfig(folders, s.topDirs(ctx, folders))
 		if err != nil {
 			s.setState(false, err.Error())
 			return
@@ -214,7 +215,7 @@ func (s *Service) supervise(ctx context.Context, c vault.Crypt) {
 			return
 		}
 		s.setState(true, "")
-		logger.Log("[Descifrado] 🔓 WebDAV en %s: la nube desde la raíz; cifradas %v, el resto en claro (caché %s)", s.opts.Addr, c.Projects(), s.opts.CacheMode)
+		logger.Log("[Descifrado] 🔓 WebDAV en %s: la nube desde la raíz; con configuración propia %v, el resto tal cual (caché %s)", s.opts.Addr, folderNames(folders), s.opts.CacheMode)
 		go pipeLog(out)
 		start := time.Now()
 		err = cmd.Wait()
@@ -236,6 +237,14 @@ func (s *Service) supervise(ctx context.Context, c vault.Crypt) {
 			backoff *= 2
 		}
 	}
+}
+
+func folderNames(fs []vault.Folder) []string {
+	var out []string
+	for _, f := range fs {
+		out = append(out, f.Name)
+	}
+	return out
 }
 
 func (s *Service) setState(running bool, errMsg string) {
@@ -263,10 +272,10 @@ func (s *Service) mountArgs(conf string) []string {
 }
 
 // superviseMount mantiene montado WEBDAV_MOUNT_PATH con el rclone interno.
-func (s *Service) superviseMount(ctx context.Context, c vault.Crypt) {
+func (s *Service) superviseMount(ctx context.Context, folders []vault.Folder) {
 	backoff := 5 * time.Second
 	for ctx.Err() == nil {
-		conf, err := s.writeConfig(c, s.topDirs(ctx, c))
+		conf, err := s.writeConfig(folders, s.topDirs(ctx, folders))
 		if err != nil {
 			s.setMount(false, err.Error())
 			return

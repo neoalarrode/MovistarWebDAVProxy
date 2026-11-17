@@ -8,15 +8,17 @@ import (
 	"path"
 	"strings"
 
+	"movistar-webdav-proxy/internal/cryptname"
 	"movistar-webdav-proxy/internal/logger"
 	"movistar-webdav-proxy/internal/rclonesvc"
+	"movistar-webdav-proxy/internal/vault"
 	"movistar-webdav-proxy/internal/webdav"
 )
 
-// decryptedGateway es el WebDAV público cuando hay clave: reenvía todo al rclone
-// interno (carpetas cifradas ya descifradas y el resto tal cual) salvo crear una
-// carpeta en la raíz, que rclone no puede hacer con «combine»: esa la crea el proxy
-// en la nube (en claro, salvo que esté marcada como cifrada en el panel) y recarga
+// decryptedGateway es el WebDAV público. Sin carpetas configuradas lo atiende el
+// WebDAV en bruto; con alguna, reenvía todo al rclone interno (cada carpeta según
+// su configuración y el resto tal cual) salvo crear una carpeta en la raíz, que
+// rclone no puede hacer con «combine»: esa la crea el proxy en la nube y recarga
 // rclone para que aparezca.
 type decryptedGateway struct {
 	upstream *httputil.ReverseProxy
@@ -37,6 +39,10 @@ func newDecryptedGateway(rcloneAddr string, raw *webdav.Server, svc *rclonesvc.S
 }
 
 func (g *decryptedGateway) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	if len(vault.Folders()) == 0 {
+		g.raw.ServeHTTP(w, r)
+		return
+	}
 	if r.Method == "MKCOL" {
 		clean := strings.Trim(path.Clean("/"+r.URL.Path), "/")
 		if clean != "" && !strings.Contains(clean, "/") {
@@ -44,7 +50,43 @@ func (g *decryptedGateway) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
+	if r.Method == http.MethodPut && strings.EqualFold(strings.TrimSpace(r.Header.Get("X-Upload-Priority")), "bulk") {
+		// rclone no reenvía la cabecera: se marca la ruta en bruto que va a escribir.
+		if raw, ok := rawPathFor(r.URL.Path); ok {
+			defer webdav.MarkBulkPath(raw)()
+		}
+	}
 	g.upstream.ServeHTTP(w, r)
+}
+
+// rawPathFor traduce una ruta del WebDAV público a la ruta en bruto en la nube:
+// igual en las carpetas sin configuración y con los nombres cifrados en las que
+// cifran nombres con el formato estándar de rclone crypt.
+func rawPathFor(p string) (string, bool) {
+	clean := strings.Trim(path.Clean("/"+p), "/")
+	folder, rest, _ := strings.Cut(clean, "/")
+	configured := false
+	for _, f := range vault.Folders() {
+		if f.Name == folder {
+			configured = true
+			break
+		}
+	}
+	if !configured {
+		return clean, true
+	}
+	v, ok := folderNames.Load(folder)
+	if !ok {
+		return "", false
+	}
+	c := v.(*cryptname.Cipher)
+	segs := []string{folder}
+	for _, s := range strings.Split(rest, "/") {
+		if s != "" {
+			segs = append(segs, c.EncryptSegment(s))
+		}
+	}
+	return strings.Join(segs, "/"), true
 }
 
 func (g *decryptedGateway) mkdirRoot(w http.ResponseWriter, r *http.Request, name string) {

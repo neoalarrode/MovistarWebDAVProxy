@@ -49,3 +49,38 @@ func containsAny(s string, subs ...string) bool {
 	}
 	return false
 }
+
+func TestFolders_SaveLoadAndMigrate(t *testing.T) {
+	old := config.TokensDir
+	config.TokensDir = t.TempDir()
+	t.Cleanup(func() { config.TokensDir = old })
+	t.Setenv("TOKENS_ENCRYPTION_KEY", "llave")
+
+	// Configuración antigua (una clave para «emby») → se convierte al cargar.
+	if err := Save(Crypt{Password: "clave", Password2: "sal", Root: "emby"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := LoadFolders(); err != nil {
+		t.Fatal(err)
+	}
+	fs := Folders()
+	if len(fs) != 1 || fs[0].Name != "emby" || NamesFor(fs[0]) == nil {
+		t.Fatalf("migración: %+v", fs)
+	}
+	// Otra carpeta con su propia clave pegada.
+	cfg := StandardConfig(Crypt{Password: "otra", Password2: "sal2"})
+	if _, err := SaveFolder(Folder{Name: "meloinvento", Config: cfg}); err != nil {
+		t.Fatal(err)
+	}
+	b, _ := os.ReadFile(foldersFile())
+	if containsAny(string(b), "[cifrada]", "chunk_size") {
+		t.Fatal("la configuración debe ir cifrada en disco")
+	}
+	if err := LoadFolders(); err != nil || len(Folders()) != 2 {
+		t.Fatalf("recarga: %v %+v", err, Folders())
+	}
+	a, b2 := NamesFor(Folders()[0]), NamesFor(Folders()[1])
+	if a == nil || b2 == nil || a.EncryptSegment("x") == b2.EncryptSegment("x") {
+		t.Fatal("cada carpeta debe descifrar con su propia clave")
+	}
+}

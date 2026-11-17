@@ -221,18 +221,16 @@ func main() {
 	if p := strings.TrimSpace(os.Getenv("WEBDAV_PORT")); p != "" {
 		webdavPort = p
 	}
-	// Con clave de cifrado configurada, el puerto WebDAV público sirve los archivos ya
-	// descifrados (rclone interno) y el WebDAV en bruto (trozos cifrados) queda solo
+	// El puerto WebDAV público lo atiende el proxy: las carpetas de la raíz con
+	// configuración de rclone (cifradas...) se sirven ya descifradas por el rclone
+	// interno y el resto tal cual. El WebDAV en bruto (trozos cifrados) queda solo
 	// para uso interno, en 127.0.0.1:WEBDAV_RAW_PORT.
 	rawPort := strings.TrimSpace(os.Getenv("WEBDAV_RAW_PORT"))
 	if rawPort == "" {
 		rawPort = "8090"
 	}
-	davAddr := ":" + webdavPort
-	encryptedMode := prepareVault()
-	if encryptedMode {
-		davAddr = "127.0.0.1:" + rawPort
-	}
+	prepareVault()
+	davAddr := "127.0.0.1:" + rawPort
 	davHTTP := &http.Server{
 		Addr:              davAddr,
 		Handler:           webdavServer,
@@ -254,21 +252,22 @@ func main() {
 	uiServer := webui.NewServerWithAuth(client, webdavServer, uiAuth)
 	cryptSvc := setupCrypt(webdavPort, rawPort)
 	defer cryptSvc.Stop()
-	if encryptedMode {
-		pubHTTP := &http.Server{
-			Addr:              ":" + webdavPort,
-			Handler:           newDecryptedGateway(internalDecryptedAddr, webdavServer, cryptSvc),
-			ReadHeaderTimeout: 10 * time.Second,
-			IdleTimeout:       120 * time.Second,
-		}
-		go func() {
-			logger.Log("[WebDAV] 🔓 WebDAV público en :%s con los archivos descifrados (en bruto solo en %s)", webdavPort, davAddr)
-			if err := pubHTTP.ListenAndServe(); err != nil && err != http.ErrServerClosed {
-				logger.Log("[FATAL] Error en el WebDAV descifrado: %v", err)
-			}
-		}()
-		defer pubHTTP.Close()
+	pubHTTP := &http.Server{
+		Addr:              ":" + webdavPort,
+		Handler:           newDecryptedGateway(internalDecryptedAddr, webdavServer, cryptSvc),
+		ReadHeaderTimeout: 10 * time.Second,
+		IdleTimeout:       120 * time.Second,
+		// Sin carpetas configuradas el WebDAV en bruto atiende directamente.
+		ConnContext: webdavServer.ConnContext,
+		ConnState:   webdavServer.ConnState,
 	}
+	go func() {
+		logger.Log("[WebDAV] 🔓 WebDAV público en :%s (en bruto solo en %s)", webdavPort, davAddr)
+		if err := pubHTTP.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+			logger.Log("[FATAL] Error en el WebDAV público: %v", err)
+		}
+	}()
+	defer pubHTTP.Close()
 	uiServer.SetCrypt(cryptSvc)
 	if webSess != nil {
 		view := webSess.LoginView()

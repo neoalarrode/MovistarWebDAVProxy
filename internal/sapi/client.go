@@ -483,7 +483,30 @@ func (c *Client) appendValidationKey(rawURL string) string {
 	if err != nil {
 		return rawURL
 	}
+	// Una URL que ya trae validationkey (p. ej. la URL firmada de descarga de un
+	// archivo) se envía tal cual: cambiar la clave o reordenar la query invalida la
+	// firma y la descarga responde 403.
+	if parsed.Query().Has("validationkey") {
+		return rawURL
+	}
+	if parsed.RawQuery == "" {
+		parsed.RawQuery = "validationkey=" + url.QueryEscape(vk)
+	} else {
+		parsed.RawQuery += "&validationkey=" + url.QueryEscape(vk)
+	}
+	return parsed.String()
+}
 
+// replaceValidationKey pone la validationkey actual en una URL de la API que ya la
+// llevaba (reintento tras renovar la sesión).
+func (c *Client) replaceValidationKey(rawURL string) string {
+	c.mu.RLock()
+	vk := c.cfg.ValidationKey
+	c.mu.RUnlock()
+	parsed, err := url.Parse(rawURL)
+	if vk == "" || err != nil {
+		return rawURL
+	}
 	q := parsed.Query()
 	q.Set("validationkey", vk)
 	parsed.RawQuery = q.Encode()
@@ -1181,7 +1204,7 @@ func (c *Client) retryRequestWithCurrentConfig(req *http.Request) (*http.Respons
 	if cfg.JSessionID != "" || cfg.ValidationKey != "" {
 		newReq.Header.Set("Cookie", sessionCookieHeader(cfg.JSessionID, cfg.ValidationKey))
 	}
-	newReq.URL, _ = url.Parse(c.appendValidationKey(newReq.URL.String()))
+	newReq.URL, _ = url.Parse(c.replaceValidationKey(newReq.URL.String()))
 	resp, err := c.httpClient.Do(newReq)
 	if err != nil {
 		return nil, err

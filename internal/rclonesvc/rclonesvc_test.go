@@ -9,33 +9,52 @@ import (
 	"movistar-webdav-proxy/internal/vault"
 )
 
-func TestWriteConfig_ThreeRemotesAndObscuredSecrets(t *testing.T) {
+// Cada carpeta lleva su configuración pegada (con su clave) enganchada a
+// «nube:<carpeta>»; el resto de la raíz va tal cual.
+func TestWriteConfig_PerFolder(t *testing.T) {
 	s := New(Options{UpstreamURL: "http://127.0.0.1:8080", User: "u", Pass: "p", ConfigDir: t.TempDir()})
-	path, err := s.writeConfig(vault.Crypt{Password: "clave", Password2: "sal", Root: "emby", ChunkSize: "1Gi", NameFormat: "*-chunk###", Transaction: "norename"}, []string{"emby", "Fotos del móvil"})
+	pasted := "[movistar]\ntype = webdav\nurl = http://x:5050\n\n[movistar-chunk]\ntype = chunker\nremote = movistar:emby\nchunk_size = 1Gi\nname_format = *-chunk###\nhash_type = none\ntransactions = norename\n\n[movistar-crypt]\ntype = crypt\nremote = movistar-chunk:\npassword = " + mustObscure(t, "clave") + "\n"
+	folders := []vault.Folder{
+		{Name: "emby", Config: pasted},
+		{Name: "meloinvento", Config: vault.StandardConfig(vault.Crypt{Password: "otra"})},
+	}
+	path, err := s.writeConfig(folders, []string{"emby", "meloinvento", "Fotos del móvil"})
 	if err != nil {
 		t.Fatal(err)
 	}
 	b, _ := os.ReadFile(path)
 	conf := string(b)
-	for _, want := range []string{"[nube]", "url = http://127.0.0.1:8080", "[trozos-0]", "remote = nube:emby", "name_format = *-chunk###", "transactions = norename", "[cifrada-0]", "remote = trozos-0:", "directory_name_encryption = true",
-		"[raiz]", "type = combine", `upstreams = "emby=cifrada-0:" "Fotos del móvil=nube:Fotos del móvil"`} {
+	for _, want := range []string{"[nube]", "url = http://127.0.0.1:8080",
+		"[c0-movistar-chunk]", "remote = nube:emby", "name_format = *-chunk###", "transactions = norename",
+		"[c0-movistar-crypt]", "remote = c0-movistar-chunk:",
+		"[c1-trozos]", "remote = nube:meloinvento", "[c1-cifrada]", "remote = c1-trozos:",
+		"[raiz]", "type = combine", `upstreams = "emby=c0-movistar-crypt:" "meloinvento=c1-cifrada:" "Fotos del móvil=nube:Fotos del móvil"`} {
 		if !strings.Contains(conf, want) {
 			t.Errorf("falta %q en:\n%s", want, conf)
 		}
 	}
-	if strings.Contains(conf, "= clave") || strings.Contains(conf, "= sal") {
-		t.Fatal("las contraseñas deben ir ofuscadas como en rclone.conf")
+	if strings.Contains(conf, "[c0-movistar]") || strings.Contains(conf, "x:5050") {
+		t.Fatal("la sección WebDAV pegada no debe usarse")
 	}
-	for _, line := range strings.Split(conf, "\n") {
-		if strings.HasPrefix(line, "password = ") {
-			if v, _ := cryptname.Reveal(strings.TrimPrefix(line, "password = ")); v != "clave" {
-				t.Errorf("password ofuscada no válida: %q", v)
-			}
-		}
+	if strings.Contains(conf, "= clave") || strings.Contains(conf, "= otra") {
+		t.Fatal("las contraseñas deben ir ofuscadas como en rclone.conf")
 	}
 	if fi, _ := os.Stat(path); fi.Mode().Perm() != 0o600 {
 		t.Errorf("permisos %v, esperados 0600", fi.Mode().Perm())
 	}
+	// Sin carpetas en la nube ni configuraciones: la raíz tal cual.
+	path, _ = s.writeConfig(nil, nil)
+	if b, _ := os.ReadFile(path); !strings.Contains(string(b), "type = alias\nremote = nube:") {
+		t.Fatalf("raíz vacía:\n%s", b)
+	}
+}
+
+func mustObscure(t *testing.T, v string) string {
+	o, err := cryptname.Obscure(v)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return o
 }
 
 // El montaje usa por defecto las mismas opciones que el de producción.
