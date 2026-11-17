@@ -123,3 +123,19 @@ func TestBulkPaths(t *testing.T) {
 		t.Fatal("marca no liberada")
 	}
 }
+
+func TestExpectUploadSize(t *testing.T) {
+	done := ExpectUploadSize("emby/d/abc", func(p string) int64 {
+		if p == "/emby/d/abc-chunk001_x1y2" {
+			return 42
+		}
+		return -1
+	})
+	if expectedUploadSize("/emby/d/abc-chunk001_x1y2") != 42 || expectedUploadSize("/emby/d/abc") != -1 || expectedUploadSize("/emby/otro") != -1 {
+		t.Fatal("tamaño esperado mal resuelto")
+	}
+	done()
+	if expectedUploadSize("/emby/d/abc-chunk001_x1y2") != -1 {
+		t.Fatal("registro no liberado")
+	}
+}

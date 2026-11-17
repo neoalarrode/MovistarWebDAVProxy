@@ -7,6 +7,7 @@ import (
 
 	"movistar-webdav-proxy/internal/cryptname"
 	"movistar-webdav-proxy/internal/logger"
+	"movistar-webdav-proxy/internal/rcloneconf"
 	"movistar-webdav-proxy/internal/rclonesvc"
 	"movistar-webdav-proxy/internal/vault"
 	"movistar-webdav-proxy/internal/webdav"
@@ -49,11 +50,20 @@ const internalDecryptedAddr = "127.0.0.1:8091"
 // folderNames guarda el descifrador de nombres de cada carpeta configurada.
 var folderNames sync.Map // nombre de carpeta → *cryptname.Cipher (o nil)
 
+// folderSizers guarda cómo calcular los tamaños en bruto de cada carpeta configurada.
+var folderSizers sync.Map // nombre de carpeta → *uploadSizer
+
 func refreshFolderNames() {
 	folderNames.Range(func(k, _ interface{}) bool { folderNames.Delete(k); return true })
+	folderSizers.Range(func(k, _ interface{}) bool { folderSizers.Delete(k); return true })
 	for _, f := range vault.Folders() {
 		if n := vault.NamesFor(f); n != nil {
 			folderNames.Store(f.Name, n)
+		}
+		if ch, err := rcloneconf.Remap(f.Config, f.Top, "nube:"+f.Name, ""); err == nil {
+			if sz := newUploadSizer(ch); sz != nil {
+				folderSizers.Store(f.Name, sz)
+			}
 		}
 	}
 }

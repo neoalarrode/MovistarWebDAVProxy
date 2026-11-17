@@ -50,10 +50,26 @@ func (g *decryptedGateway) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
-	if r.Method == http.MethodPut && strings.EqualFold(strings.TrimSpace(r.Header.Get("X-Upload-Priority")), "bulk") {
-		// rclone no reenvía la cabecera: se marca la ruta en bruto que va a escribir.
+	if r.Method == http.MethodPut {
 		if raw, ok := rawPathFor(r.URL.Path); ok {
-			defer webdav.MarkBulkPath(raw)()
+			// rclone no reenvía la cabecera: se marca la ruta en bruto que va a escribir.
+			if strings.EqualFold(strings.TrimSpace(r.Header.Get("X-Upload-Priority")), "bulk") {
+				defer webdav.MarkBulkPath(raw)()
+			}
+			// rclone sube en flujo sin Content-Length: se le dice al WebDAV en bruto el
+			// tamaño de cada objeto para que suba directo a la nube.
+			if size := r.ContentLength; size >= 0 {
+				if sz := sizerFor(r.URL.Path); sz != nil {
+					dir, base := path.Split("/" + raw)
+					defer webdav.ExpectUploadSize(raw, func(p string) int64 {
+						pd, name := path.Split(p)
+						if pd != dir {
+							return -1
+						}
+						return sz.sizeOf(size, base, name)
+					})()
+				}
+			}
 		}
 	}
 	g.upstream.ServeHTTP(w, r)
@@ -110,4 +126,19 @@ func (g *decryptedGateway) mkdirRoot(w http.ResponseWriter, r *http.Request, nam
 	g.svc.Restart()
 	g.svc.WaitReady(context.Background())
 	w.WriteHeader(http.StatusCreated)
+}
+
+// sizerFor devuelve cómo calcular los tamaños en bruto en la carpeta de p (sin
+// configuración: tal cual).
+func sizerFor(p string) *uploadSizer {
+	folder, _, _ := strings.Cut(strings.Trim(path.Clean("/"+p), "/"), "/")
+	for _, f := range vault.Folders() {
+		if f.Name == folder {
+			if v, ok := folderSizers.Load(folder); ok {
+				return v.(*uploadSizer)
+			}
+			return nil
+		}
+	}
+	return &uploadSizer{}
 }
