@@ -13,8 +13,8 @@ import (
 
 // Transferencias en curso del proxy, para el panel: subidas a la nube y descargas
 // (GET) servidas a los clientes. Las descargas de un mismo archivo se agrupan (un
-// cliente puede leerlo por rangos) y, al terminar, siguen visibles un rato marcadas
-// como inactivas: el cliente suele tener lo leído en su búfer.
+// cliente puede leerlo por rangos). Solo se muestra lo que se está pidiendo: al
+// terminar la petición, o si lleva 30 s sin mover datos, deja de verse.
 
 // TransferInfo es una transferencia tal como la muestra el panel.
 type TransferInfo struct {
@@ -138,7 +138,7 @@ func (h *TransferHandle) Reset() {
 	h.t.mu.Unlock()
 }
 
-// Done cierra la petición. Las subidas desaparecen; las descargas quedan inactivas.
+// Done cierra la petición; sin peticiones en curso, la transferencia desaparece.
 func (h *TransferHandle) Done() {
 	if h == nil {
 		return
@@ -151,12 +151,12 @@ func (h *TransferHandle) Done() {
 	}
 	tr.active--
 	tr.lastActive = h.t.now()
-	if tr.active <= 0 && tr.kind == "upload" {
+	if tr.active <= 0 {
 		delete(h.t.items, h.key)
 	}
 }
 
-// Snapshot devuelve las transferencias activas y las descargas recientes.
+// Snapshot devuelve las transferencias que están moviendo datos.
 func (t *TransferTracker) Snapshot() []TransferInfo {
 	t.mu.Lock()
 	defer t.mu.Unlock()
@@ -164,8 +164,13 @@ func (t *TransferTracker) Snapshot() []TransferInfo {
 	out := []TransferInfo{}
 	for key, tr := range t.items {
 		idleFor := now.Sub(tr.lastActive)
-		if tr.active <= 0 && idleFor > t.keep {
+		if tr.active <= 0 {
 			delete(t.items, key)
+			continue
+		}
+		// Una descarga abierta que no se está leyendo (el cliente tira de su búfer)
+		// no es una transferencia en curso.
+		if tr.kind == "download" && idleFor >= 30*time.Second {
 			continue
 		}
 		info := TransferInfo{Kind: tr.kind, Path: tr.path, Display: display(tr.path), Size: tr.size, Bytes: tr.position}
@@ -191,9 +196,6 @@ func (t *TransferTracker) Snapshot() []TransferInfo {
 		if tr.kind == "upload" && info.Speed > 0 && tr.size > tr.position {
 			eta := int64(float64(tr.size-tr.position) / info.Speed)
 			info.ETA = &eta
-		}
-		if tr.active <= 0 || idleFor >= 30*time.Second {
-			info.Idle, info.IdleSeconds = true, int64(idleFor.Seconds())
 		}
 		out = append(out, info)
 	}

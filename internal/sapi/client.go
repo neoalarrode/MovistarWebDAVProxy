@@ -275,8 +275,11 @@ type Client struct {
 	// web, si no es nil, sustituye la autenticación del cliente de escritorio por
 	// la sesión de la web (ver EnableWebSession).
 	web WebSession
-	// freshURLs guarda, por ID, la última URL de descarga renovada en modo web.
+	// freshURLs guarda, por ID, la última URL de descarga pedida (freshURL).
 	freshURLs sync.Map
+	// urlLookupFailed guarda, por ID, cuándo falló la última consulta (no se repite
+	// antes de descargar durante un minuto: se usa la URL conocida).
+	urlLookupFailed sync.Map
 
 	sapiSem        chan struct{}
 	pacingMu       sync.Mutex
@@ -1551,10 +1554,31 @@ func (c *Client) ListAllMediaInFolder(folderID int64) ([]MediaItem, error) {
 // descarga. Devuelve (nil, nil) si SAPI responde correctamente pero todavía no lo
 // conoce (p. ej. justo después de subirlo, mientras se indexa).
 func (c *Client) GetMediaByID(mediaID string) (*MediaItem, error) {
+	items, err := c.getMediaByIDs([]string{mediaID})
+	if err != nil {
+		c.urlLookupFailed.Store(mediaID, time.Now())
+		return nil, err
+	}
+	c.urlLookupFailed.Delete(mediaID)
+	for i := range items {
+		if items[i].ID == mediaID {
+			// Toda consulta por ID trae una URL de descarga recién firmada.
+			if items[i].URL != "" {
+				c.storeFreshURL(mediaID, items[i].URL)
+			}
+			return &items[i], nil
+		}
+	}
+	return nil, nil
+}
+
+// getMediaByIDs consulta varios archivos en una sola llamada (la web pide así las
+// URL de descarga).
+func (c *Client) getMediaByIDs(ids []string) ([]MediaItem, error) {
 	u := fmt.Sprintf("%s/media?action=get&origin=omh,dropbox", c.baseURL)
 	payload := map[string]interface{}{
 		"data": map[string]interface{}{
-			"ids":    []string{mediaID},
+			"ids":    ids,
 			"fields": []string{"name", "size", "url", "etag", "folderid", "modificationdate"},
 		},
 	}
@@ -1573,7 +1597,7 @@ func (c *Client) GetMediaByID(mediaID string) (*MediaItem, error) {
 
 	if resp.StatusCode != http.StatusOK {
 		b, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
-		return nil, fmt.Errorf("get media failed (HTTP %d, id=%s): %s", resp.StatusCode, mediaID, string(b))
+		return nil, fmt.Errorf("get media failed (HTTP %d, ids=%v): %s", resp.StatusCode, ids, string(b))
 	}
 
 	var res struct {
@@ -1582,18 +1606,13 @@ func (c *Client) GetMediaByID(mediaID string) (*MediaItem, error) {
 		} `json:"data"`
 		Error interface{} `json:"error"`
 	}
-	if err := json.NewDecoder(io.LimitReader(resp.Body, 1<<20)).Decode(&res); err != nil {
-		return nil, fmt.Errorf("decode get media error (id=%s): %w", mediaID, err)
+	if err := json.NewDecoder(io.LimitReader(resp.Body, 8<<20)).Decode(&res); err != nil {
+		return nil, fmt.Errorf("decode get media error (ids=%v): %w", ids, err)
 	}
 	if res.Error != nil {
-		return nil, fmt.Errorf("API error in get media (id=%s): %v", mediaID, res.Error)
+		return nil, fmt.Errorf("API error in get media (ids=%v): %v", ids, res.Error)
 	}
-	for i := range res.Data.Media {
-		if res.Data.Media[i].ID == mediaID {
-			return &res.Data.Media[i], nil
-		}
-	}
-	return nil, nil
+	return res.Data.Media, nil
 }
 
 func (c *Client) CreateFolder(name string, parentID int64) (*FolderItem, error) {
@@ -2479,11 +2498,17 @@ func (c *Client) DownloadFileStreamRange(item MediaItem, offset int64) (io.ReadC
 	if item.ID == "" || strings.HasPrefix(item.ID, "virtual:") {
 		return c.downloadRange(item, offset)
 	}
-	// Las URL de descarga van firmadas y caducan (tanto en modo normal como en modo web).
-	// Se usa la última URL renovada de ese archivo y, si la descarga falla, se pide una
-	// URL nueva por ID y se reintenta una vez (salvo si el WAF ya está en pausa).
-	if u, ok := c.freshURLs.Load(item.ID); ok {
-		item.URL = u.(string)
+	// Las URL de descarga van firmadas y caducan, y las del listado (guardadas en la
+	// base local) pueden tener horas. Como la web (getDownloadItemURL → getMediaById),
+	// antes de descargar se pide la URL de ese archivo; se reutiliza solo para las
+	// lecturas por rangos que sigan (DOWNLOAD_URL_MAX_AGE). Si aun así falla, se pide
+	// otra y se reintenta una vez (salvo si el WAF ya está en pausa).
+	if u, ok := c.FreshDownloadURL(item.ID); ok {
+		item.URL = u
+	} else if !c.urlLookupFailedRecently(item.ID) {
+		if fresh, ferr := c.GetMediaByID(item.ID); ferr == nil && fresh != nil && fresh.URL != "" {
+			item.URL = fresh.URL
+		}
 	}
 	rc, err := c.downloadRange(item, offset)
 	if err == nil {
@@ -2498,9 +2523,46 @@ func (c *Client) DownloadFileStreamRange(item MediaItem, offset int64) (io.ReadC
 		return nil, err
 	}
 	logger.Log("[SAPI] 🔄 Descarga de '%s' (byte %d) fallida (%v); reintentando con URL de descarga renovada.", item.Name, offset, err)
-	c.freshURLs.Store(item.ID, fresh.URL)
+	c.storeFreshURL(item.ID, fresh.URL)
 	item.URL = fresh.URL
 	return c.downloadRange(item, offset)
+}
+
+// freshURL es una URL de descarga y cuándo se pidió.
+type freshURL struct {
+	url string
+	at  time.Time
+}
+
+// freshURLMaxAge es cuánto se reutiliza una URL de descarga pedida
+// (DOWNLOAD_URL_MAX_AGE, por defecto 1h): duran unas horas.
+func freshURLMaxAge() time.Duration {
+	if d, err := time.ParseDuration(strings.TrimSpace(os.Getenv("DOWNLOAD_URL_MAX_AGE"))); err == nil && d > 0 {
+		return d
+	}
+	return time.Hour
+}
+
+func (c *Client) urlLookupFailedRecently(id string) bool {
+	v, ok := c.urlLookupFailed.Load(id)
+	return ok && time.Since(v.(time.Time)) < time.Minute
+}
+
+func (c *Client) storeFreshURL(id, u string) {
+	c.freshURLs.Store(id, freshURL{url: u, at: time.Now()})
+}
+
+// FreshDownloadURL devuelve la URL de descarga de id si se pidió hace poco.
+func (c *Client) FreshDownloadURL(id string) (string, bool) {
+	v, ok := c.freshURLs.Load(id)
+	if !ok {
+		return "", false
+	}
+	f := v.(freshURL)
+	if time.Since(f.at) > freshURLMaxAge() {
+		return "", false
+	}
+	return f.url, true
 }
 
 func (c *Client) downloadRange(item MediaItem, offset int64) (io.ReadCloser, error) {
