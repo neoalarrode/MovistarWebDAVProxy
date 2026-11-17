@@ -54,3 +54,45 @@ func expectedUploadSize(p string) int64 {
 	}
 	return -1
 }
+
+// Fecha de modificación original de las subidas que llegan por el WebDAV público: el
+// rclone interno sube cada objeto con la hora de subida (no conoce la del archivo),
+// así que la pasarela registra aquí la X-OC-Mtime del cliente para la ruta en bruto.
+var expectMtimes struct {
+	sync.Mutex
+	m map[*mtimeEntry]struct{}
+}
+
+type mtimeEntry struct{ prefix, mtime string }
+
+// ExpectUploadMtime fija la X-OC-Mtime de las subidas en bruto cuya ruta empiece por
+// prefix, hasta llamar a la función devuelta.
+func ExpectUploadMtime(prefix, mtime string) func() {
+	e := &mtimeEntry{prefix: "/" + strings.Trim(prefix, "/"), mtime: mtime}
+	expectMtimes.Lock()
+	if expectMtimes.m == nil {
+		expectMtimes.m = map[*mtimeEntry]struct{}{}
+	}
+	expectMtimes.m[e] = struct{}{}
+	expectMtimes.Unlock()
+	var once sync.Once
+	return func() {
+		once.Do(func() {
+			expectMtimes.Lock()
+			delete(expectMtimes.m, e)
+			expectMtimes.Unlock()
+		})
+	}
+}
+
+func expectedUploadMtime(p string) string {
+	p = "/" + strings.Trim(p, "/")
+	expectMtimes.Lock()
+	defer expectMtimes.Unlock()
+	for e := range expectMtimes.m {
+		if strings.HasPrefix(p, e.prefix) {
+			return e.mtime
+		}
+	}
+	return ""
+}

@@ -11,6 +11,8 @@ import (
 	"fmt"
 	"io"
 	"net"
+	"net/http"
+	"net/url"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -48,6 +50,29 @@ func DefaultMountArgs(cacheDir string) []string {
 		"--cache-dir", cacheDir, "--vfs-read-chunk-size", "32M", "--vfs-read-chunk-size-limit", "256M",
 		"--dir-cache-time", "1000h", "--attr-timeout", "1h", "--umask", "022",
 		"--rc", "--rc-addr", "127.0.0.1:5573", "--rc-no-auth"}
+}
+
+// RCAddr es el control remoto del rclone interno (solo en local).
+const RCAddr = "127.0.0.1:8092"
+
+// Forget hace que el rclone interno olvide lo que tiene en caché de un archivo (p. ej.
+// tras subirlo: guarda la hora de subida, no la fecha original que ya tiene la nube).
+func Forget(file string) error {
+	req, err := http.NewRequest(http.MethodPost, "http://"+RCAddr+"/vfs/forget?file="+url.QueryEscape(strings.TrimPrefix(file, "/")), nil)
+	if err != nil {
+		return err
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	resp, err := http.DefaultClient.Do(req.WithContext(ctx))
+	if err != nil {
+		return err
+	}
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return fmt.Errorf("vfs/forget: HTTP %d", resp.StatusCode)
+	}
+	return nil
 }
 
 // Service vigila el proceso de rclone.
@@ -192,7 +217,9 @@ func (s *Service) args(conf string) []string {
 		"--addr", s.opts.Addr, "--vfs-cache-mode", s.opts.CacheMode,
 		// Todo lo escribe este mismo rclone, así que su caché de carpetas sigue al día;
 		// releer cada minuto obligaba al chunker a volver a leer sus metadatos.
-		"--dir-cache-time", "1h", "--log-level", "NOTICE"}
+		"--dir-cache-time", "1h", "--log-level", "NOTICE",
+		// Control remoto local (vfs/forget tras cada subida, ver Forget).
+		"--rc", "--rc-addr", RCAddr, "--rc-no-auth"}
 	if s.opts.User != "" {
 		a = append(a, "--user", s.opts.User, "--pass", s.opts.Pass)
 	}

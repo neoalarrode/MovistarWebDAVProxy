@@ -475,6 +475,11 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		s.activeWG.Add(1)
 		defer s.activeWG.Done()
 
+		// La subida llega del rclone interno: la fecha original es la del cliente de la
+		// pasarela, no la que manda rclone (la hora de subida).
+		if mt := expectedUploadMtime(urlPath); mt != "" {
+			r.Header.Set("X-OC-Mtime", mt)
+		}
 		// Conservar la fecha de modificación original si el cliente envía X-OC-Mtime
 		r = withOCMtime(lw, r)
 
