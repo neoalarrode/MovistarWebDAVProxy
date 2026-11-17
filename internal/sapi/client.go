@@ -1539,6 +1539,10 @@ func (c *Client) ListAllMediaInFolder(folderID int64) ([]MediaItem, error) {
 		}
 		for i := range res.Data.Media {
 			res.Data.Media[i].FolderID = folderID
+			// La URL del listado está recién firmada: sirve para descargar sin pedirla otra vez.
+			if res.Data.Media[i].ID != "" && res.Data.Media[i].URL != "" {
+				c.storeFreshURL(res.Data.Media[i].ID, res.Data.Media[i].URL)
+			}
 		}
 		allFiles = append(allFiles, res.Data.Media...)
 		if len(res.Data.Media) < limit {
@@ -2704,4 +2708,40 @@ func isDefiniteBinaryFile(name string) bool {
 	default:
 		return false
 	}
+}
+
+// MediaDiagnostics devuelve, sin interpretar, lo que SAPI dice de un archivo (la
+// consulta por ID de la web con todos los campos útiles) y su estado de validación.
+// Solo lectura, para diagnosticar archivos sin URL de descarga.
+func (c *Client) MediaDiagnostics(mediaID string) (map[string]interface{}, error) {
+	out := map[string]interface{}{"id": mediaID}
+	u := fmt.Sprintf("%s/media?action=get&origin=omh,dropbox", c.baseURL)
+	payload, _ := json.Marshal(map[string]interface{}{"data": map[string]interface{}{
+		"ids":    []string{mediaID},
+		"fields": []string{"name", "size", "url", "viewurl", "etag", "folderid", "creationdate", "modificationdate", "status", "mediatype", "contenttype", "videometadata", "thumbnails", "origin", "exported", "shared"},
+	}})
+	req, err := http.NewRequest("POST", u, bytes.NewReader(payload))
+	if err != nil {
+		return nil, err
+	}
+	req.Header.Set("Content-Type", "application/json;charset=UTF-8")
+	resp, err := c.DoRequest(req)
+	if err != nil {
+		return nil, err
+	}
+	b, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
+	resp.Body.Close()
+	out["get_http"] = resp.StatusCode
+	var raw interface{}
+	if json.Unmarshal(b, &raw) == nil {
+		out["get"] = raw
+	} else {
+		out["get"] = string(b)
+	}
+	if st, err := c.MediaValidationStatus(mediaID); err != nil {
+		out["validation_error"] = err.Error()
+	} else {
+		out["validation_status"] = st
+	}
+	return out, nil
 }

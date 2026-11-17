@@ -190,7 +190,9 @@ func (s *Service) topDirs(ctx context.Context, folders []vault.Folder) []string 
 func (s *Service) args(conf string) []string {
 	a := []string{"serve", "webdav", "raiz:", "--config", conf,
 		"--addr", s.opts.Addr, "--vfs-cache-mode", s.opts.CacheMode,
-		"--dir-cache-time", "1m", "--log-level", "NOTICE"}
+		// Todo lo escribe este mismo rclone, así que su caché de carpetas sigue al día;
+		// releer cada minuto obligaba al chunker a volver a leer sus metadatos.
+		"--dir-cache-time", "1h", "--log-level", "NOTICE"}
 	if s.opts.User != "" {
 		a = append(a, "--user", s.opts.User, "--pass", s.opts.Pass)
 	}
