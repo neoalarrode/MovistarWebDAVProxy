@@ -2503,6 +2503,7 @@ func (c *Client) DownloadFileStreamRange(item MediaItem, offset int64) (io.ReadC
 	// antes de descargar se pide la URL de ese archivo; se reutiliza solo para las
 	// lecturas por rangos que sigan (DOWNLOAD_URL_MAX_AGE). Si aun así falla, se pide
 	// otra y se reintenta una vez (salvo si el WAF ya está en pausa).
+	listed := item.URL // la del listado, por si la recién pedida no sirve
 	if u, ok := c.FreshDownloadURL(item.ID); ok {
 		item.URL = u
 	} else if !c.urlLookupFailedRecently(item.ID) {
@@ -2519,6 +2520,13 @@ func (c *Client) DownloadFileStreamRange(item MediaItem, offset int64) (io.ReadC
 	}
 	fresh, ferr := c.GetMediaByID(item.ID)
 	if ferr != nil || fresh == nil || fresh.URL == "" || fresh.URL == item.URL {
+		if listed != "" && listed != item.URL {
+			logger.Log("[SAPI] 🔄 Descarga de '%s' (byte %d) fallida con la URL pedida (%v); se prueba la del listado.", item.Name, offset, err)
+			item.URL = listed
+			if rc, lerr := c.downloadRange(item, offset); lerr == nil {
+				return rc, nil
+			}
+		}
 		logger.Log("[SAPI] ⚠️ Descarga de '%s' (byte %d) fallida: %v; sin URL nueva disponible.", item.Name, offset, err)
 		return nil, err
 	}
