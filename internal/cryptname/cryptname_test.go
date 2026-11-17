@@ -45,3 +45,13 @@ func TestReveal_RcloneVectors(t *testing.T) {
 		}
 	}
 }
+
+func TestObscureReveal_RoundTrip(t *testing.T) {
+	o, err := Obscure("clave secreta ñ")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got, err := Reveal(o); err != nil || got != "clave secreta ñ" {
+		t.Fatalf("ida y vuelta: %q, %v", got, err)
+	}
+}

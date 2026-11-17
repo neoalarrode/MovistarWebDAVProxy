@@ -4,42 +4,59 @@ import (
 	"os"
 	"strings"
 
-	"movistar-webdav-proxy/internal/cryptname"
 	"movistar-webdav-proxy/internal/logger"
+	"movistar-webdav-proxy/internal/rclonesvc"
+	"movistar-webdav-proxy/internal/vault"
 	"movistar-webdav-proxy/internal/webdav"
 )
 
-// setupCryptNames activa, si se configura, el descifrado de nombres de rclone crypt
-// para mostrarlos legibles en el panel:
+// setupCrypt carga la clave de cifrado guardada en el proxy (internal/vault) y, si
+// hay, arranca el WebDAV descifrado interno y el descifrado de nombres del panel.
 //
-//	RCLONE_CRYPT_PASSWORD / RCLONE_CRYPT_PASSWORD2  las de rclone.conf (ofuscadas)
-//	RCLONE_CRYPT_OBSCURED=false                      si se dan en claro
-//	RCLONE_CRYPT_ROOT                                carpeta WebDAV del remoto crypt (p. ej. /emby)
-func setupCryptNames() {
-	pass := strings.TrimSpace(os.Getenv("RCLONE_CRYPT_PASSWORD"))
-	if pass == "" {
-		return
+// Para pasar una clave existente sin usar el panel, al primer arranque se puede dar
+// RCLONE_CRYPT_PASSWORD / RCLONE_CRYPT_PASSWORD2 (como en rclone.conf, ofuscadas o
+// en claro) y RCLONE_CRYPT_ROOT: se guardan en el proxy y ya no hacen falta.
+func setupCrypt(webdavPort string) *rclonesvc.Service {
+	if _, err := vault.Load(); err != nil {
+		logger.Log("[Descifrado] ⚠️ %v", err)
 	}
-	pass2 := strings.TrimSpace(os.Getenv("RCLONE_CRYPT_PASSWORD2"))
-	if !strings.EqualFold(strings.TrimSpace(os.Getenv("RCLONE_CRYPT_OBSCURED")), "false") {
-		var err error
-		if pass, err = cryptname.Reveal(pass); err != nil {
-			logger.Log("[WebDAV] ⚠️ RCLONE_CRYPT_PASSWORD no es una contraseña ofuscada de rclone: %v", err)
-			return
-		}
-		if pass2 != "" {
-			if pass2, err = cryptname.Reveal(pass2); err != nil {
-				logger.Log("[WebDAV] ⚠️ RCLONE_CRYPT_PASSWORD2 no es una contraseña ofuscada de rclone: %v", err)
-				return
+	if vault.Current() == nil {
+		if p := strings.TrimSpace(os.Getenv("RCLONE_CRYPT_PASSWORD")); p != "" {
+			c := vault.Defaults()
+			c.Password, c.Password2 = p, strings.TrimSpace(os.Getenv("RCLONE_CRYPT_PASSWORD2"))
+			if r := strings.TrimSpace(os.Getenv("RCLONE_CRYPT_ROOT")); r != "" {
+				c.Root = r
+			}
+			if err := vault.Save(c); err != nil {
+				logger.Log("[Descifrado] ⚠️ No se pudo guardar la clave de RCLONE_CRYPT_PASSWORD: %v", err)
+			} else {
+				logger.Log("[Descifrado] 🔑 Clave de cifrado importada del entorno y guardada en el proxy.")
 			}
 		}
 	}
-	c, err := cryptname.New(pass, pass2)
-	if err != nil {
-		logger.Log("[WebDAV] ⚠️ No se pudo preparar el descifrado de nombres: %v", err)
-		return
+	webdav.SetDisplayName(func(p string) string {
+		c := vault.Current()
+		n := vault.Names()
+		if c == nil || n == nil {
+			return ""
+		}
+		return n.DecryptPath(p, c.Root)
+	})
+
+	pass := os.Getenv("WEBDAV_PASSWORD")
+	if pass == "" && os.Getenv("WEBDAV_PASSWORD_HASH") != "" {
+		logger.Log("[Descifrado] ⚠️ Con WEBDAV_PASSWORD_HASH el rclone interno no puede autenticarse contra el proxy: usa WEBDAV_PASSWORD.")
 	}
-	root := os.Getenv("RCLONE_CRYPT_ROOT")
-	webdav.SetDisplayName(func(p string) string { return c.DecryptPath(p, root) })
-	logger.Log("[WebDAV] 🔓 Nombres de rclone crypt descifrados en el panel (raíz %q)", "/"+strings.Trim(root, "/"))
+	svc := rclonesvc.New(rclonesvc.Options{
+		Binary:      os.Getenv("RCLONE_BINARY"),
+		UpstreamURL: "http://127.0.0.1:" + webdavPort,
+		User:        os.Getenv("WEBDAV_USER"),
+		Pass:        pass,
+		Addr:        os.Getenv("WEBDAV_DECRYPTED_ADDR"),
+		CacheMode:   os.Getenv("WEBDAV_DECRYPTED_CACHE_MODE"),
+	})
+	if vault.Current() != nil {
+		svc.Restart()
+	}
+	return svc
 }

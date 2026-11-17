@@ -252,6 +252,30 @@
         </div>
     </div>
 
+    <!-- Cifrado de archivos (rclone crypt + chunker dentro del proxy) -->
+    <div id="crypt-card" class="bg-white rounded-2xl shadow-sm border border-slate-200 p-6 mb-8">
+        <div class="flex items-center justify-between mb-3">
+            <h2 class="text-lg font-semibold flex items-center"><span class="mr-2">🔐</span> Cifrado de archivos</h2>
+            <span id="cr-state" class="px-3 py-1 rounded-full text-xs font-semibold bg-slate-100 text-slate-600">-</span>
+        </div>
+        <p id="cr-info" class="text-sm text-slate-600 mb-3">-</p>
+        <details class="text-sm">
+            <summary class="cursor-pointer text-slate-600 font-medium">Introducir o cambiar la clave</summary>
+            <div class="grid sm:grid-cols-2 gap-2 mt-3">
+                <input id="cr-pass" type="password" autocomplete="off" placeholder="Contraseña (password de rclone.conf)" class="px-3 py-2 bg-slate-50 border border-slate-200 rounded-lg text-xs font-mono">
+                <input id="cr-pass2" type="password" autocomplete="off" placeholder="Sal (password2, opcional)" class="px-3 py-2 bg-slate-50 border border-slate-200 rounded-lg text-xs font-mono">
+                <input id="cr-root" type="text" placeholder="Carpeta en la nube (por defecto emby)" class="px-3 py-2 bg-slate-50 border border-slate-200 rounded-lg text-xs font-mono">
+                <input id="cr-chunk" type="text" placeholder="Tamaño de trozo (por defecto 1Gi)" class="px-3 py-2 bg-slate-50 border border-slate-200 rounded-lg text-xs font-mono">
+            </div>
+            <p class="text-xs text-slate-500 mt-2">Admite las contraseñas tal como están en rclone.conf (ofuscadas) o en claro. Se guardan cifradas en el proxy.</p>
+            <div class="flex flex-wrap gap-2 mt-3">
+                <button onclick="saveCrypt()" class="px-3 py-1.5 bg-blue-600 hover:bg-blue-700 text-white font-semibold rounded-lg text-xs">Guardar clave</button>
+                <button id="cr-gen" onclick="generateCrypt()" class="px-3 py-1.5 bg-slate-100 hover:bg-slate-200 text-slate-700 font-semibold rounded-lg text-xs border border-slate-200">Generar clave nueva</button>
+            </div>
+            <pre id="cr-new" class="hidden mt-3 text-[11px] font-mono bg-amber-50 border border-amber-200 rounded-xl p-3 whitespace-pre-wrap text-amber-900"></pre>
+        </details>
+    </div>
+
     <!-- Consola en tiempo real -->
     <div class="bg-slate-900 rounded-2xl shadow-sm border border-slate-800 overflow-hidden">
         <div class="flex items-center justify-between bg-slate-800 px-4 py-2 border-b border-slate-700">
@@ -457,6 +481,8 @@
             fetchLogs();
             logInterval = setInterval(fetchLogs, 2000);
             initWebMode();
+            refreshCrypt();
+            setInterval(refreshCrypt, 15000);
         });
 
         // ---- Tema claro / oscuro ----
@@ -772,6 +798,45 @@
                 if (data.status === 'ok') { showToast('Límite de ancho de banda: ' + data.bwlimit + ' (se aplica en menos de un minuto)'); refreshCopyStatus(); }
                 else showToast(data.message || 'No se pudo aplicar', 'error');
             } catch (err) { showToast('No se pudo aplicar', 'error'); }
+        }
+
+        async function refreshCrypt() {
+            let d;
+            try { d = await (await fetch('/crypt_status')).json(); } catch (err) { return; }
+            const st = document.getElementById('cr-state'), info = document.getElementById('cr-info');
+            const svc = d.service || {};
+            if (!d.configured) {
+                st.textContent = 'Sin clave'; st.className = 'px-3 py-1 rounded-full text-xs font-semibold bg-amber-100 text-amber-800';
+                info.textContent = 'Introduce la clave que ya usas (la de rclone.conf) o genera una nueva para un almacenamiento vacío.';
+            } else {
+                st.textContent = svc.running ? 'Activo' : 'Clave guardada';
+                st.className = 'px-3 py-1 rounded-full text-xs font-semibold ' + (svc.running ? 'bg-emerald-100 text-emerald-800' : 'bg-slate-100 text-slate-700');
+                info.textContent = `Carpeta «${d.root}», trozos de ${d.chunk_size}. ` + (svc.running ? `WebDAV descifrado en el puerto ${String(svc.addr || '').replace(/^.*:/, '')}.` : (svc.error ? 'WebDAV descifrado parado: ' + svc.error : '')) + (d.secrets_encrypted ? '' : ' ⚠️ Sin TOKENS_ENCRYPTION_KEY la clave se guarda sin cifrar.');
+            }
+            document.getElementById('cr-gen').classList.toggle('hidden', !!d.configured);
+        }
+
+        async function saveCrypt() {
+            const body = {password: document.getElementById('cr-pass').value, password2: document.getElementById('cr-pass2').value,
+                root: document.getElementById('cr-root').value, chunk_size: document.getElementById('cr-chunk').value};
+            if (!body.password) { showToast('Falta la contraseña', 'error'); return; }
+            if (!confirm('¿Guardar esta clave? Si no es la que cifró los archivos subidos, no se podrán leer.')) return;
+            const res = await fetch('/crypt_config', {method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify(body)});
+            const data = await res.json();
+            if (data.status === 'ok') { showToast('Clave guardada'); document.getElementById('cr-pass').value = ''; document.getElementById('cr-pass2').value = ''; }
+            else showToast(data.message || 'Error', 'error');
+            refreshCrypt();
+        }
+
+        async function generateCrypt() {
+            if (!confirm('¿Generar una clave nueva? Úsalo solo para un almacenamiento vacío.')) return;
+            const res = await fetch('/crypt_generate', {method: 'POST'});
+            const data = await res.json();
+            if (data.status !== 'ok') { showToast(data.message || 'Error', 'error'); return; }
+            const box = document.getElementById('cr-new');
+            box.textContent = 'GUARDA ESTO EN LUGAR SEGURO (no se volverá a mostrar). Sin esta clave no se puede leer nada:\npassword  = ' + data.password + '\npassword2 = ' + data.password2 + '\ncarpeta   = ' + data.root;
+            box.classList.remove('hidden');
+            refreshCrypt();
         }
 
         async function checkCredentials() {

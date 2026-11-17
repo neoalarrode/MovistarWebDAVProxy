@@ -176,7 +176,6 @@ func main() {
 	maxDown, maxUp := config.TransferLimits(client.WebMode())
 	webdav.SetTransferLimits(maxDown, maxUp)
 	webui.LoadUploadBandwidth()
-	setupCryptNames()
 	if client.WebMode() && strings.TrimSpace(os.Getenv("SAPI_MAX_CONCURRENT")) == "" {
 		// En modo web las llamadas a la API ya las limita el navegador; aquí solo hay
 		// que dejar sitio a cada transferencia para que una subida no frene las lecturas.
@@ -243,6 +242,9 @@ func main() {
 	// 3. Servidor Web UI
 	// avisará por telegram si OnSessionExpired, al cargas notificaciones
 	uiServer := webui.NewServerWithAuth(client, webdavServer, uiAuth)
+	cryptSvc := setupCrypt(webdavPort)
+	defer cryptSvc.Stop()
+	uiServer.SetCrypt(cryptSvc)
 	if webSess != nil {
 		view := webSess.LoginView()
 		uiServer.SetWebLogin(view.Handler("/web-login/"))

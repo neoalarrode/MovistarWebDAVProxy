@@ -9,6 +9,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"html/template"
+	"movistar-webdav-proxy/internal/rclonesvc"
 	"net"
 	"net/http"
 	"net/url"
@@ -71,6 +72,7 @@ type Server struct {
 	sessions     map[string]*webSession
 	webLogin     http.Handler // vista de inicio de sesión de la web (modo web), bajo /web-login/
 	webStatus    func() map[string]interface{}
+	crypt        *rclonesvc.Service // WebDAV descifrado interno
 
 	copyDir        string // COPY_STATUS_DIR: registros del script de copia (solo lectura)
 	copyControlDir string // COPY_CONTROL_DIR: órdenes para el script (límite de ancho de banda)
@@ -167,6 +169,9 @@ func (s *Server) Routes() http.Handler {
 	}
 	mux.HandleFunc("/web_session", s.handleWebSession)
 	mux.HandleFunc("/transfers", s.handleTransfers)
+	mux.HandleFunc("/crypt_status", s.handleCryptStatus)
+	mux.HandleFunc("/crypt_config", s.handleCryptConfig)
+	mux.HandleFunc("/crypt_generate", s.handleCryptGenerate)
 	mux.HandleFunc("/copy_status", s.handleCopyStatus)
 	mux.HandleFunc("/copy_events", s.handleCopyEvents)
 	mux.HandleFunc("/copy_bwlimit", s.handleCopyBWLimit)
@@ -185,7 +190,6 @@ func (s *Server) securityMiddleware(next http.Handler) http.Handler {
 		w.Header().Set("Cross-Origin-Resource-Policy", "same-origin")
 		w.Header().Set("Permissions-Policy", "camera=(), microphone=(), geolocation=()")
 
-
 		// /health siempre accesible sin autenticación para healthchecks de Docker
 		if r.URL.Path == "/health" || r.URL.Path == "/favicon.ico" {
 			next.ServeHTTP(w, r)
@@ -199,7 +203,7 @@ func (s *Server) securityMiddleware(next http.Handler) http.Handler {
 				return
 			}
 		}
-		
+
 		// Rutas públicas de autenticación web
 		if r.URL.Path == "/login" || r.URL.Path == "/logout" {
 			next.ServeHTTP(w, r)
@@ -1135,8 +1139,7 @@ func (s *Server) handleTestTelegram(w http.ResponseWriter, r *http.Request) {
 			chatID = envChat
 		}
 	}
-	
-	
+
 	if botToken == "" || chatID == "" {
 		jsonResponse(w, http.StatusBadRequest, map[string]interface{}{
 			"status":  "error",

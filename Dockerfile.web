@@ -26,6 +26,9 @@ RUN apt-get update && \
 WORKDIR /app
 
 COPY --from=builder /movistar-proxy /app/movistar-proxy
+# rclone interno: sirve por WebDAV los archivos ya descifrados (crypt + chunker sobre
+# el propio proxy) con la clave guardada en el proxy.
+COPY --from=rclone/rclone:1.68.2 /usr/local/bin/rclone /usr/local/bin/rclone
 COPY docker-entrypoint.sh /app/docker-entrypoint.sh
 RUN chmod +x /app/docker-entrypoint.sh
 
@@ -39,7 +42,7 @@ ENV WEB_SESSION=true \
 
 VOLUME ["/app/tokens"]
 
-EXPOSE 5000 8080
+EXPOSE 5000 8080 8081
 
 HEALTHCHECK --interval=30s --timeout=5s --start-period=30s --retries=3 \
     CMD ["/app/movistar-proxy", "-healthcheck"]
