@@ -19,7 +19,9 @@ func TestReadCopyStatus(t *testing.T) {
 	write("plan.txt", "Peliculas\nAMC+\nNetflix\n")
 	write("progress.log", "2026-11-12 22:43:38 INICIO Peliculas\n2026-11-13 08:10:00 FIN Peliculas rc=0\n2026-11-13 08:10:01 INICIO AMC+\n")
 	write("AMC+.log", "2026/11/13 08:20:00 INFO  :    42.311 GiB / 168.200 GiB, 25%, 31.020 MiB/s, ETA 1h9m\n2026/11/13 08:21:00 ERROR : a.mkv: Failed to copy: 503\n")
-	_ = os.WriteFile(filepath.Join(ctl, "bwlimit"), []byte("20M\n"), 0o644)
+	// El límite de subida ya no es del script de copia: es el común del proxy.
+	uploadBWLimit.Store("20M")
+	t.Cleanup(func() { uploadBWLimit.Store("off") })
 
 	st := readCopyStatus(dir, ctl)
 	if !st.Enabled || st.Current != "AMC+" {

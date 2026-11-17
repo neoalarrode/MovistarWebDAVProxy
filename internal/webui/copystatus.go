@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"movistar-webdav-proxy/internal/webdav"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -64,6 +65,7 @@ type copyStatus struct {
 	BWLimit      string         `json:"bwlimit"`
 	Uploading    []copyTransfer `json:"uploading"`
 	Reading      []copyTransfer `json:"reading"`
+	Queued       []copyTransfer `json:"queued"`       // subidas esperando hueco en el proxy
 	UploadSpeed  float64        `json:"upload_speed"` // bytes/s según rclone en vivo
 	ReadSpeed    float64        `json:"read_speed"`
 	Folders      []folderStatus `json:"folders"`
@@ -201,14 +203,19 @@ func readCopyStatus(dir, controlDir string) copyStatus {
 
 // readCopyStatusWith es readCopyStatus con el seguimiento de lecturas recientes.
 func readCopyStatusWith(dir, controlDir string, reads *readTracker) copyStatus {
-	st := copyStatus{RecentErrors: []string{}, BWLimit: "off", Uploading: []copyTransfer{}, Reading: []copyTransfer{}}
+	st := copyStatus{RecentErrors: []string{}, BWLimit: "off", Uploading: []copyTransfer{}, Reading: []copyTransfer{}, Queued: []copyTransfer{}}
+	// La actividad (subidas, lecturas y cola) sale del propio proxy y se muestra
+	// siempre, haya o no copia masiva. Si hay registros de la copia (COPY_STATUS_DIR),
+	// se añaden su progreso y los nombres reales que da rclone.
+	st.Enabled = true
 	if dir == "" {
+		fillFromProxy(&st)
 		return st
 	}
 	if _, err := os.Stat(dir); err != nil {
+		fillFromProxy(&st)
 		return st
 	}
-	st.Enabled = true
 
 	var runStart time.Time // inicio de la ejecución en curso: lo anterior es de otra ejecución
 	libs := map[string]*copyLibrary{}
@@ -313,11 +320,7 @@ func readCopyStatusWith(dir, controlDir string, reads *readTracker) copyStatus {
 	if rd, sp := readTransfers(filepath.Join(dir, "mount-stats.json"), 90*time.Second); rd != nil {
 		st.Reading, st.ReadSpeed = rd, sp
 	}
-	if controlDir != "" {
-		if b, err := os.ReadFile(filepath.Join(controlDir, "bwlimit")); err == nil && strings.TrimSpace(string(b)) != "" {
-			st.BWLimit = strings.TrimSpace(string(b))
-		}
-	}
+
 	// Recuento de subidas de la copia antes de añadir las del montaje: buildFolders
 	// atribuye las de la copia a la carpeta en curso y las del montaje por su ruta.
 	copyUploads := len(st.Uploading)
@@ -326,6 +329,7 @@ func readCopyStatusWith(dir, controlDir string, reads *readTracker) copyStatus {
 		st.Reading = reads.merge(st.Reading, time.Now())
 	}
 	st.Folders = buildFolders(dir, st, copyUploads)
+	fillFromProxy(&st)
 	return st
 }
 
@@ -335,10 +339,6 @@ func (s *Server) handleCopyStatus(w http.ResponseWriter, r *http.Request) {
 
 // handleCopyBWLimit guarda el límite pedido; el script de copia lo aplica en caliente.
 func (s *Server) handleCopyBWLimit(w http.ResponseWriter, r *http.Request) {
-	if s.copyControlDir == "" {
-		jsonResponse(w, http.StatusBadRequest, map[string]interface{}{"status": "error", "message": "COPY_CONTROL_DIR no configurado"})
-		return
-	}
 	var req struct {
 		Rate string `json:"rate"`
 	}
@@ -346,17 +346,20 @@ func (s *Server) handleCopyBWLimit(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	rate := strings.TrimSpace(req.Rate)
-	if !bwlimitRe.MatchString(rate) {
+	bps, err := webdav.ParseBandwidth(rate)
+	if err != nil || !bwlimitRe.MatchString(rate) {
 		jsonResponse(w, http.StatusBadRequest, map[string]interface{}{"status": "error", "message": "Límite no válido (usa off, 20M, 500K...)"})
 		return
 	}
-	if err := os.WriteFile(filepath.Join(s.copyControlDir, "bwlimit"), []byte(rate+"\n"), 0o644); err != nil {
-		jsonResponse(w, http.StatusInternalServerError, map[string]interface{}{"status": "error", "message": err.Error()})
-		return
+	// El límite se aplica en el proxy a TODAS las subidas, entren por donde entren.
+	webdav.SetUploadBandwidth(bps)
+	saveUploadBandwidth(rate)
+	// Compatibilidad: si hay script de copia, también se le pasa.
+	if s.copyControlDir != "" {
+		_ = os.WriteFile(filepath.Join(s.copyControlDir, "bwlimit"), []byte(rate+"\n"), 0o644)
 	}
 	jsonResponse(w, http.StatusOK, map[string]interface{}{"status": "ok", "bwlimit": rate})
 }
-
 
 // parseLocalTime interpreta las fechas del script ("2026-11-12 22:43:38" o RFC 3339)
 // y de rclone ("2026/11/12 22:43:38") en hora local. Devuelve cero si no encaja.
@@ -375,4 +378,38 @@ func firstTwoFields(line string) string {
 		return ""
 	}
 	return f[0] + " " + f[1]
+}
+
+// fillFromProxy completa la actividad con lo que ve el propio proxy: la cola
+// siempre y, si rclone no ha dado datos (sin copia masiva o sin sus estadísticas),
+// las subidas y lecturas en curso.
+func fillFromProxy(st *copyStatus) {
+	st.BWLimit = currentUploadBandwidth()
+	var up, rd, q []copyTransfer
+	var upSpeed, rdSpeed float64
+	for _, t := range webdav.Transfers.Snapshot() {
+		ct := copyTransfer{Name: strings.TrimPrefix(t.Path, "/"), Size: t.Size, Bytes: t.Bytes, Percentage: t.Percentage,
+			Speed: t.Speed, ETA: t.ETA, Idle: t.Idle, IdleSeconds: t.IdleSeconds}
+		switch t.Kind {
+		case "upload":
+			up = append(up, ct)
+			upSpeed += t.Speed
+		case "download":
+			rd = append(rd, ct)
+			if !t.Idle {
+				rdSpeed += t.Speed
+			}
+		case "queued":
+			q = append(q, ct)
+		}
+	}
+	if q != nil {
+		st.Queued = q
+	}
+	if len(st.Uploading) == 0 && len(up) > 0 {
+		st.Uploading, st.UploadSpeed = up, upSpeed
+	}
+	if len(st.Reading) == 0 && len(rd) > 0 {
+		st.Reading, st.ReadSpeed = rd, rdSpeed
+	}
 }

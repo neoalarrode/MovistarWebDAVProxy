@@ -230,6 +230,10 @@
             <h3 class="text-xs font-semibold text-slate-500 uppercase tracking-wide mb-2">⬇ Leyendo ahora</h3>
             <div id="cp-rd" class="space-y-2"></div>
         </div>
+        <div id="cp-q-box" class="hidden mb-4">
+            <h3 class="text-xs font-semibold text-slate-500 uppercase tracking-wide mb-2">⏳ En cola (esperando hueco de subida)</h3>
+            <div id="cp-q" class="space-y-2"></div>
+        </div>
         <div id="cp-legend" class="hidden flex flex-wrap gap-3 text-[11px] text-slate-500 mb-1.5">
             <span><span class="inline-block w-2 h-2 rounded-full bg-slate-400 mr-1"></span>sin actividad</span>
             <span><span class="inline-block w-2 h-2 rounded-full bg-blue-500 mr-1"></span>subiendo</span>
@@ -599,6 +603,7 @@
 
             renderTransfers('cp-up-box', 'cp-up', d.uploading, 'bg-blue-500');
             renderTransfers('cp-rd-box', 'cp-rd', d.reading, 'bg-emerald-500');
+            renderTransfers('cp-q-box', 'cp-q', d.queued || [], 'bg-amber-500');
             if (d.current && d.upload_speed) document.getElementById('cp-speed').textContent = fmtBytes(d.upload_speed) + '/s';
 
             const errs = document.getElementById('cp-errlist');

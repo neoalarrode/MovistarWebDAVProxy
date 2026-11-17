@@ -455,6 +455,9 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 		// Vigilar que el cuerpo llegue entero (ver uploadGuard en fs.go).
 		guard := &uploadGuard{expected: r.ContentLength}
+		// Subidas masivas (p. ej. un script de migración con rclone --header-upload
+		// "X-Upload-Priority: bulk"): ceden los huecos a las demás.
+		guard.bulk = strings.EqualFold(strings.TrimSpace(r.Header.Get("X-Upload-Priority")), "bulk")
 		if r.Body != nil {
 			r.Body = &guardedBody{rc: r.Body, guard: guard}
 		}
