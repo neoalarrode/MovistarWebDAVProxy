@@ -1,6 +1,6 @@
 # Mapear Movistar / O2 Cloud como Unidad de Red 💻📂
 
-Esta guía detalla paso a paso cómo montar tu almacenamiento de Movistar u O2 Cloud como un disco local o unidad de red en **Windows**, **macOS** y **Linux** a través del proxy WebDAV.
+Esta guía detalla paso a paso cómo montar tu almacenamiento de Movistar u O2 Cloud como un disco local o unidad de red en **Windows**, **macOS**, **Linux** y **Synology DSM (File Station)** a través del proxy WebDAV.
 
 > [!NOTE]
 > A partir de la versión **v2.0.5**, el proxy incorpora un sistema de absorción silenciosa de archivos basura (*DevNull Absorber*). Puedes navegar, crear y mover archivos sin preocuparte de que metadatos como `desktop.ini`, `.DS_Store`, `thumbs.db` o carpetas de papelera se suban a tu nube.
@@ -102,7 +102,7 @@ net use M: http://TU_IP_SERVIDOR:5050 /user:TU_USUARIO TU_PASSWORD /persistent:n
 
 > [!WARNING]
 > **Límite de 4 GB por archivo en Movistar / O2 Cloud:**  
-> La API de Telefónica no admite archivos individuales mayores a 4 GB (4096 MB). Si necesitas almacenar archivos gigantes (por ejemplo imágenes ISO de más de 4 GB), puedes configurar un remoto secundario tipo [`chunker`](https://rclone.org/chunker/) sobre tu remoto `movistar:` con un tamaño de bloque de 2 GB (`chunk_size = 2G`) para fragmentarlos de forma transparente.
+> La API de Telefónica no admite archivos individuales mayores a 4 GB (4096 MB). Si necesitas almacenar archivos gigantes (por ejemplo imágenes ISO de más de 4 GB), puedes configurar un remoto secundario tipo [`chunker`](https://rclone.org/chunker/) sobre tu remoto `movistar:` para fragmentarlos de forma transparente. Usa la [configuración recomendada de Rclone](backup-clients.md#-configuración-avanzada-archivos-de-más-de-4-gb-chunker-y-cifrado-crypt) (`name_format = *-chunk###` y `transactions = norename`): con la de por defecto, cada trozo se renombra cambiando de extensión y el proxy tiene que volver a subirlo entero.
 
 ---
 
@@ -211,6 +211,30 @@ rclone mount movistar: /mnt/movistar_cloud \
   --allow-other \
   --daemon
 ```
+
+---
+
+## 🗄️ 4. Synology DSM (File Station)
+
+Si ejecutas el proxy en tu NAS Synology (o en otro equipo de la red), puedes explorar y gestionar tus archivos directamente desde **File Station** sin instalar clientes adicionales:
+
+1. Abre **File Station** en DSM.
+2. Entra en **Herramientas → Conexión remota → Configuración de conexión** (*Tools → Remote Connection → Connection Setup*).
+3. Selecciona **WebDAV**.
+4. Introduce estos datos (configuración orientativa para tu contenedor actual):
+
+![Conexión remota WebDAV en Synology File Station](images/dsm-file-station-webdav.png)
+
+| Campo | Valor |
+| :--- | :--- |
+| **Nombre** | `Movistar Cloud` |
+| **Protocolo** | `WebDAV` |
+| **Servidor** | IP de tu NAS (o servidor donde corre el proxy) |
+| **Puerto** | `5050` |
+| **Ruta** | `/` |
+| **Usuario** | Tu `WEBDAV_USER` |
+| **Contraseña** | Tu `WEBDAV_PASSWORD` |
+| **HTTPS** | Desactivado si no has configurado TLS |
 
 ---
 

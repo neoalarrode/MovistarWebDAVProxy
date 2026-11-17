@@ -9,7 +9,9 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
+	"time"
 
 	"movistar-webdav-proxy/internal/config"
 	"movistar-webdav-proxy/internal/sapi"
@@ -644,5 +646,297 @@ func TestWebUI_Login_CSRFProtection(t *testing.T) {
 
 	if proxyRec.Code != http.StatusSeeOther {
 		t.Errorf("expected 303 on valid X-Forwarded-Host match, got %d", proxyRec.Code)
+	}
+}
+
+func TestWebUI_Logout_DirectNavigationAndResidualBasicAuth(t *testing.T) {
+	handler, _ := setupTestWebUI(t, config.AuthConfig{
+		Username: "admin",
+		Password: "secretpassword",
+	})
+
+	// 1. Iniciar sesión mediante formulario
+	loginReq := httptest.NewRequest("POST", "/login", strings.NewReader("username=admin&password=secretpassword"))
+	loginReq.Host = "localhost:5000"
+	loginReq.Header.Set("Origin", "http://localhost:5000")
+	loginReq.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	loginRec := httptest.NewRecorder()
+	handler.ServeHTTP(loginRec, loginReq)
+
+	if loginRec.Code != http.StatusSeeOther {
+		t.Fatalf("login failed: code %d", loginRec.Code)
+	}
+
+	var sessionCookie *http.Cookie
+	for _, c := range loginRec.Result().Cookies() {
+		if c.Name == sessionCookieName && c.Value != "" {
+			sessionCookie = c
+			break
+		}
+	}
+	if sessionCookie == nil {
+		t.Fatalf("session cookie not set")
+	}
+
+	// 2. Acceso a / con la cookie -> 200 OK
+	panelReq := httptest.NewRequest("GET", "/", nil)
+	panelReq.Header.Set("Accept", "text/html,application/xhtml+xml")
+	panelReq.AddCookie(sessionCookie)
+	panelRec := httptest.NewRecorder()
+	handler.ServeHTTP(panelRec, panelReq)
+	if panelRec.Code != http.StatusOK {
+		t.Fatalf("expected 200 on panel with session cookie, got %d", panelRec.Code)
+	}
+
+	// 3. Cerrar sesión vía GET /logout (navegación directa del botón)
+	logoutReq := httptest.NewRequest("GET", "/logout", nil)
+	logoutReq.AddCookie(sessionCookie)
+	logoutRec := httptest.NewRecorder()
+	handler.ServeHTTP(logoutRec, logoutReq)
+
+	if logoutRec.Code != http.StatusSeeOther || logoutRec.Header().Get("Location") != "/login" {
+		t.Errorf("expected 303 -> /login on GET /logout, got %d -> %s", logoutRec.Code, logoutRec.Header().Get("Location"))
+	}
+
+	// Verificar cookie eliminada
+	var clearedCookie *http.Cookie
+	for _, c := range logoutRec.Result().Cookies() {
+		if c.Name == sessionCookieName {
+			clearedCookie = c
+			break
+		}
+	}
+	if clearedCookie == nil || clearedCookie.MaxAge >= 0 {
+		t.Errorf("expected session cookie to be cleared on logout")
+	}
+
+	// 4. Si el navegador visita /login con cabecera Basic Auth residual -> debe mostrar la página de login (200), NO redirigir a /
+	loginPageReq := httptest.NewRequest("GET", "/login", nil)
+	loginPageReq.SetBasicAuth("admin", "secretpassword")
+	loginPageRec := httptest.NewRecorder()
+	handler.ServeHTTP(loginPageRec, loginPageReq)
+
+	if loginPageRec.Code != http.StatusOK {
+		t.Errorf("expected 200 on /login despite residual Basic Auth, got %d", loginPageRec.Code)
+	}
+	if !strings.Contains(loginPageRec.Body.String(), "Iniciar Sesión") {
+		t.Errorf("expected login page to be rendered")
+	}
+
+	// 5. Si el navegador intenta navegar a / sin cookie pero con Basic Auth residual -> debe redirigir a /login (303)
+	blockedPanelReq := httptest.NewRequest("GET", "/", nil)
+	blockedPanelReq.Header.Set("Accept", "text/html,application/xhtml+xml")
+	blockedPanelReq.SetBasicAuth("admin", "secretpassword")
+	blockedPanelRec := httptest.NewRecorder()
+	handler.ServeHTTP(blockedPanelRec, blockedPanelReq)
+
+	if blockedPanelRec.Code != http.StatusSeeOther || blockedPanelRec.Header().Get("Location") != "/login" {
+		t.Errorf("expected 303 -> /login for browser navigation without session cookie, got %d -> %s", blockedPanelRec.Code, blockedPanelRec.Header().Get("Location"))
+	}
+}
+
+func TestWebUI_CompleteLogin_O2_CapturesSAPISession(t *testing.T) {
+	tmpDir := t.TempDir()
+	origTokensDir := config.TokensDir
+	config.TokensDir = tmpDir
+	t.Cleanup(func() { config.TokensDir = origTokensDir })
+
+	tokenServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json;charset=UTF-8")
+		_ = json.NewEncoder(w).Encode(map[string]interface{}{
+			"access_token":  "o2-access-token-123",
+			"refresh_token": "o2-refresh-token-456",
+			"expires_in":    3600,
+			"token_type":    "Bearer",
+		})
+	}))
+	defer tokenServer.Close()
+	t.Setenv("OAUTH_TOKEN_URL", tokenServer.URL)
+
+	syncDone := make(chan struct{})
+	var syncOnce sync.Once
+	sapiServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		if strings.Contains(r.URL.Path, "/login/oauth") {
+			_ = json.NewEncoder(w).Encode(map[string]interface{}{
+				"data": map[string]interface{}{
+					"validationkey": "o2-sapi-valkey",
+					"jsessionid":    "o2-sapi-jsess",
+				},
+				"responsetime": 1794834400000,
+			})
+			return
+		}
+		if strings.Contains(r.URL.Path, "/profile/changes") {
+			_ = json.NewEncoder(w).Encode(map[string]interface{}{"data": map[string]interface{}{}})
+			syncOnce.Do(func() { close(syncDone) })
+			return
+		}
+		_ = json.NewEncoder(w).Encode(map[string]interface{}{"data": map[string]interface{}{"status": "ok"}})
+	}))
+	defer sapiServer.Close()
+	t.Setenv("SAPI_BASE_URL", sapiServer.URL+"/sapi")
+
+	client, err := sapi.NewClient(config.AccountConfig{})
+	if err != nil {
+		t.Fatalf("NewClient failed: %v", err)
+	}
+	authCfg := config.AuthConfig{AuthDisabled: true}
+	davSrv := webdav.NewServerWithAuth(client, authCfg)
+	t.Cleanup(func() {
+		select {
+		case <-syncDone:
+			time.Sleep(50 * time.Millisecond)
+		case <-time.After(1 * time.Second):
+		}
+		if ms := davSrv.MetadataStore(); ms != nil {
+			_ = ms.Close()
+		}
+	})
+	uiSrv := NewServerWithAuth(client, davSrv, authCfg)
+	handler := uiSrv.Routes()
+
+	// 1. /start_login for O2
+	startBody := strings.NewReader(`{"phone":"612345678","provider":"o2"}`)
+	startReq := httptest.NewRequest("POST", "/start_login", startBody)
+	startReq.Header.Set("Content-Type", "application/json")
+	startRec := httptest.NewRecorder()
+	handler.ServeHTTP(startRec, startReq)
+
+	if startRec.Code != http.StatusOK {
+		t.Fatalf("/start_login failed with code %d: %s", startRec.Code, startRec.Body.String())
+	}
+
+	// 2. /complete_login with code for O2
+	completeBody := strings.NewReader(`{"phone":"612345678","provider":"o2","code_or_url":"test-code"}`)
+	completeReq := httptest.NewRequest("POST", "/complete_login", completeBody)
+	completeReq.Header.Set("Content-Type", "application/json")
+	completeRec := httptest.NewRecorder()
+	handler.ServeHTTP(completeRec, completeReq)
+
+	if completeRec.Code != http.StatusOK {
+		t.Fatalf("/complete_login failed with code %d: %s", completeRec.Code, completeRec.Body.String())
+	}
+
+	savedCfg := config.LoadAccountConfig("612345678")
+	if savedCfg.Provider != "o2" {
+		t.Errorf("Provider = %q, want o2", savedCfg.Provider)
+	}
+	if savedCfg.AccessToken != "o2-access-token-123" {
+		t.Errorf("AccessToken = %q, want o2-access-token-123", savedCfg.AccessToken)
+	}
+	if savedCfg.RefreshToken != "o2-refresh-token-456" {
+		t.Errorf("RefreshToken = %q, want o2-refresh-token-456", savedCfg.RefreshToken)
+	}
+	if savedCfg.ValidationKey != "o2-sapi-valkey" {
+		t.Errorf("ValidationKey = %q, want o2-sapi-valkey", savedCfg.ValidationKey)
+	}
+	if savedCfg.JSessionID != "o2-sapi-jsess" {
+		t.Errorf("JSessionID = %q, want o2-sapi-jsess", savedCfg.JSessionID)
+	}
+
+	clientCfg := client.GetConfig()
+	if clientCfg.AccessToken != "o2-access-token-123" {
+		t.Errorf("clientCfg.AccessToken = %q, want 'o2-access-token-123'", clientCfg.AccessToken)
+	}
+	if clientCfg.ValidationKey != "o2-sapi-valkey" {
+		t.Errorf("clientCfg.ValidationKey = %q, want 'o2-sapi-valkey'", clientCfg.ValidationKey)
+	}
+	if clientCfg.JSessionID != "o2-sapi-jsess" {
+		t.Errorf("clientCfg.JSessionID = %q, want 'o2-sapi-jsess'", clientCfg.JSessionID)
+	}
+}
+
+func TestWebUI_CompleteLogin_Movistar_CapturesSAPISession(t *testing.T) {
+	tmpDir := t.TempDir()
+	origTokensDir := config.TokensDir
+	config.TokensDir = tmpDir
+	t.Cleanup(func() { config.TokensDir = origTokensDir })
+
+	tokenServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json;charset=UTF-8")
+		_ = json.NewEncoder(w).Encode(map[string]interface{}{
+			"access_token":  "mov-access-token-123",
+			"refresh_token": "mov-refresh-token-456",
+			"expires_in":    3600,
+			"token_type":    "Bearer",
+		})
+	}))
+	defer tokenServer.Close()
+	t.Setenv("OAUTH_TOKEN_URL", tokenServer.URL)
+
+	syncDone := make(chan struct{})
+	var syncOnce sync.Once
+	sapiServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if strings.Contains(r.URL.Path, "/login/oauth") {
+			w.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(w).Encode(map[string]interface{}{
+				"data": map[string]interface{}{
+					"validationkey": "mov-sapi-valkey",
+					"jsessionid":    "mov-sapi-jsess",
+				},
+				"responsetime": 1794834400000,
+			})
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]interface{}{"data": map[string]interface{}{"status": "ok"}})
+		if strings.Contains(r.URL.Path, "/profile/changes") {
+			syncOnce.Do(func() { close(syncDone) })
+		}
+	}))
+	defer sapiServer.Close()
+	t.Setenv("SAPI_BASE_URL", sapiServer.URL+"/sapi")
+
+	client, err := sapi.NewClient(config.AccountConfig{})
+	if err != nil {
+		t.Fatalf("NewClient failed: %v", err)
+	}
+	authCfg := config.AuthConfig{AuthDisabled: true}
+	davSrv := webdav.NewServerWithAuth(client, authCfg)
+	t.Cleanup(func() {
+		select {
+		case <-syncDone:
+			time.Sleep(50 * time.Millisecond)
+		case <-time.After(1 * time.Second):
+		}
+		if ms := davSrv.MetadataStore(); ms != nil {
+			_ = ms.Close()
+		}
+	})
+	uiSrv := NewServerWithAuth(client, davSrv, authCfg)
+	handler := uiSrv.Routes()
+
+	// 1. /start_login for Movistar
+	startBody := strings.NewReader(`{"phone":"622334455","provider":"movistar"}`)
+	startReq := httptest.NewRequest("POST", "/start_login", startBody)
+	startReq.Header.Set("Content-Type", "application/json")
+	startRec := httptest.NewRecorder()
+	handler.ServeHTTP(startRec, startReq)
+
+	if startRec.Code != http.StatusOK {
+		t.Fatalf("/start_login failed with code %d: %s", startRec.Code, startRec.Body.String())
+	}
+
+	// 2. /complete_login with code for Movistar
+	completeBody := strings.NewReader(`{"phone":"622334455","provider":"movistar","code_or_url":"test-code"}`)
+	completeReq := httptest.NewRequest("POST", "/complete_login", completeBody)
+	completeReq.Header.Set("Content-Type", "application/json")
+	completeRec := httptest.NewRecorder()
+	handler.ServeHTTP(completeRec, completeReq)
+
+	if completeRec.Code != http.StatusOK {
+		t.Fatalf("/complete_login failed with code %d: %s", completeRec.Code, completeRec.Body.String())
+	}
+
+	savedCfg := config.LoadAccountConfig("622334455")
+	if savedCfg.Provider != "movistar" {
+		t.Errorf("Provider = %q, want movistar", savedCfg.Provider)
+	}
+	if savedCfg.ValidationKey != "mov-sapi-valkey" {
+		t.Errorf("savedCfg.ValidationKey = %q, want 'mov-sapi-valkey'", savedCfg.ValidationKey)
+	}
+	if savedCfg.JSessionID != "mov-sapi-jsess" {
+		t.Errorf("savedCfg.JSessionID = %q, want 'mov-sapi-jsess'", savedCfg.JSessionID)
 	}
 }

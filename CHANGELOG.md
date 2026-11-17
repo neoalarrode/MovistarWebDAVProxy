@@ -2,6 +2,122 @@
 
 Todos los cambios notables en **Movistar / O2 Cloud WebDAV Proxy** se documentan en este archivo.
 
+## [v2.6.8] - 2026-11-16
+
+### 🛠️ Resiliencia en Subidas Largas de Hyper Backup (`HTTP 401` tras 1h)
+- **Reintento automático ante `HTTP 401` en `UploadFileToFolder` (`internal/sapi/client.go`):**
+  - Cuando una subida en streaming recibe `401`, rebobina el `io.ReadSeeker` y reintenta con la sesión renovada (escalando al Paso 2 `refreshSessionWithMode(true)` si el Paso 1 no fue suficiente), evitando abortar copias largas de Synology Hyper Backup.
+  - En `doRequestLocked`, evita lanzar una renovación redundante cuando `processSAPIResponse` ya rotó credenciales por cabecera.
+- **Ventana deslizante de `LastRefreshDate` y Paso 1 en `RefreshSession` (`internal/sapi/client.go`, `internal/auth/oauth.go`):**
+  - `processSAPIResponse` actualiza `LastRefreshDate` durante peticiones `2xx` activas cada > 25 min para no exceder la ventana de 3600 s (`expiresin`) en SAPI, e impide que cookies del host `upload.*` sobrescriban una `JSESSIONID` activa de SAPI.
+  - `RefreshSession` usa un `LastRefreshDate` fresco en el Paso 1 cuando el anterior supera 45 min, acepta la sesión renovada, rellena `LastRefreshDate` desde `ResponseTime` y registra en los logs por qué el Paso 1 escala al Paso 2.
+- **`RefreshOAuthToken` conforme a RFC 6749 §2.3.1 (`internal/auth/oauth.go`):**
+  - Envía primero `Authorization: Basic` sin duplicar credenciales en el cuerpo (con fallback automático incluyéndolas si falla) e incluye el resumen sanitizado del error real devuelto por `apiseg.telefonica.es`.
+- **Logs limpios ante respuestas HTML (`internal/sapi/client.go`, `internal/sapi/changes.go`):**
+  - Nuevo helper `summarizeHTTPErrorBody` en `UploadFileToFolder`, `GetMediaByIDs` y `GetFoldersByIDs` para resumir páginas HTML SPA de 95 KB (p. ej. `HTML error page (title="Movistar Cloud", ... bytes)`) en lugar de volcar el HTML completo al log.
+
+## [v2.6.7] - 2026-11-16
+
+### 🎨 Modo oscuro en pantalla de login (PR `#51`)
+- Añadido script de gestión automática/manual de tema oscuro en `internal/webui/templates/login.html`.
+
+## [v2.5.6] - 2026-11-16
+
+### 🔔 Notificaciones Globales de Telegram y Diagnóstico de User-Agent (PR `#53`)
+- **Notificador global de Telegram (`internal/notifier/telegram.go`, `cmd/server/main.go`, `internal/webui/server.go`):**
+  - Instancia global `notifier.Default` inicializada automáticamente desde `TELEGRAM_BOT_TOKEN` y `TELEGRAM_CHAT_ID` al arrancar, sin esperar a abrir el panel web.
+  - Prioridad para las credenciales guardadas en `/app/tokens` al cargar la cuenta, con fallback automático a las variables de entorno de Docker si se limpia o desvincula la cuenta.
+  - Nuevas funciones `Send` y `Alert` / `SendAlert` con control antispam de 1 hora independiente por clave (`lastAlerts`) y notificaciones automáticas de arranque (`WebDAV Proxy iniciado`), cuenta sin vincular / sesión web no iniciada y fallos críticos (SAPI / Chromium).
+- **Logs de `User-Agent` al inicio (`internal/auth/oauth.go`, `cmd/server/main.go`):**
+  - Añadidas `GetSAPIUserAgentInfo` y `GetDesktopUserAgentInfo` para registrar en el arranque (en modo estándar) si `SAPI_USER_AGENT` y `DESKTOP_USER_AGENT` usan su valor por defecto o uno personalizado, facilitando el diagnóstico ante errores `401`/`403`.
+- **Documentación y Compose (`README.md`, `docs/configuration.md`, `docs/backup-clients.md`, `docs/network-drive.md`, `docker-compose.yml`, `docker-compose.web.yml`):**
+  - Reestructurado el `README.md` para facilitar la primera integración, actualizados los archivos YAML con `TELEGRAM_BOT_TOKEN`, `TELEGRAM_CHAT_ID` y `TOKENS_ENCRYPTION_KEY`, y separados los detalles técnicos avanzados en `docs/configuration.md` y `docs/backup-clients.md`.
+
+## [v2.5.5] - 2026-11-16
+
+### 🛡️ Bypass de CloudFront WAF (401 de 0 bytes) y Sesión SAPI (PR `#52`, `#49`)
+- **Sanitización de `X-deviceid` (`auth.SanitizeDeviceID`):** normaliza identificadores `fol-...` (eliminando `+`, `/`, `=`) al formato `web-...` en `GenerateDeviceID`, `sapiLoginOAuthRequest`, `handleCompleteLogin` y `doRequestLocked`, evitando los descartes `HTTP 401` vacíos de CloudFront WAF.
+- **Huella de navegador alineada (`SAPIUserAgent`):** restaurado a `Chrome/133.0.0.0` (coincidente con la huella uTLS `Chrome-133`) junto con `Referer`, `X-Requested-With: XMLHttpRequest` y `Accept-Language`.
+- **Inicialización y renovación de sesión SAPI sin quemar tokens:**
+  - `sapiLoginOAuthRequest` conserva las cookies del `client.Jar` cuando `/sapi/login/oauth` responde `200 OK` HTML sin `Set-Cookie`, evitando llamadas repetidas que consumían el login.
+  - `processSAPIResponse` ignora `Set-Cookie` en respuestas `>= 400` y `NewClient` prescinde del `CookieJar` automático para no capturar `JSESSIONID` anónimas de páginas de error `401` ni enviar cookies duplicadas.
+  - Unificado el flujo de `SAPILoginOAuth` para Movistar y O2, con cooldown `< 30s` aplicado solo a la rotación de `RefreshOAuthToken` cuando ya existe sesión activa y escalado automático si el reintento sigue devolviendo `401`.
+- **Tests CI (`waf_headers_ci_test.go`, `oauth_provider_test.go`, `server_test.go`):** añadidas pruebas de regresión para cabecera WAF, respuesta HTML de `/sapi/login/oauth`, filtrado de cookies en `401` y conservación de `JSESSIONID`.
+
+## [v2.5.4] - 2026-11-15
+
+### 🔐 Corrección del flujo de cierre de sesión y Basic Auth en WebUI (PR `#47`)
+- **Navegación HTML vs. API (`internal/webui/server.go`):** las peticiones de navegación del navegador (`Accept: text/html`) requieren sesión activa por cookie y redirigen a `/login` si no la tienen, evitando bucles con cabeceras residuales de Basic Auth (reservada para clientes no interactivos/API).
+- **`/login` y `/logout`:** `/login` comprueba la cookie de sesión en `GET`/`HEAD` y `/logout` limpia siempre la cookie de sesión.
+- **Botón de cierre de sesión (`internal/webui/templates/index.html`):** navega directamente a `/logout` (deshabilitando el botón para evitar clics repetidos) y añade `type="button"` / `pointer-events-none`.
+- **Tests (`internal/webui/server_test.go`):** añadidas pruebas para el flujo de logout, navegación directa y prevención de bucle con Basic Auth residual.
+
+## [v2.5.3] - 2026-11-15
+
+### 🔒 Seguridad WebUI, `DESKTOP_USER_AGENT` y modo oscuro en login (PR `#43`)
+- **Cabeceras de seguridad y protección CSRF (`internal/webui/server.go`):** añadidas `base-uri 'self'` y `form-action 'self'` al `Content-Security-Policy`, cabeceras `Cross-Origin-Opener-Policy: same-origin`, `Cross-Origin-Resource-Policy: same-origin` y `Permissions-Policy`, además de bloqueo de peticiones `Sec-Fetch-Site: cross-site` en métodos que modifican estado (`POST`, `PUT`, `DELETE`, `PATCH`).
+- **User-Agent configurable (`DESKTOP_USER_AGENT`):** añadido `GetDesktopUserAgent()` en `internal/auth/oauth.go` para permitir sobreescribir el `User-Agent` en `ExchangeCodeForTokens` y `RefreshOAuthToken`.
+- **Plantillas WebUI (`login.html`, `index.html`):** añadido soporte de modo oscuro y favicon en `login.html`, y carga de fuentes/Tailwind con `crossorigin` y `referrerpolicy="no-referrer"` sin `@import` externo.
+
+## [v2.5.2] - 2026-11-15
+
+### 🔄 Paridad entre modo normal (OAuth) y modo web (`#41`)
+- **Descargas de archivos recién subidos o con URL caducada (`#41`):** unificados `downloadRange` y `OpenFile` (`waitForDownloadURL`) para ambos modos. Las lecturas inmediatas tras `PUT` esperan a que SAPI indexe la URL (respetando el backoff ante errores) y las respuestas con cuerpo vacío o rango ignorado renuevan la URL vía `GetMediaByID` en lugar de devolver `503`.
+- **Copia en la nube (`COPY`):** `tryServerCopy` (`/media/file?action=copy`) habilitado también en modo normal, con fallback automático a descarga y re-subida si el archivo aún se está indexando (`MED-1032`) o el servidor lo rechaza.
+- **Validación al mover (`MOVE`):** ante `MED-1017`, `UpdateMedia`/`MoveFile` sondea `get-validation-status` también en modo normal antes de reintentar.
+- **Borrados unificados (`DELETE`):** `DeleteFolder` y `DeleteFile` intentan primero los endpoints modernos (`softdelete` / `/media/<tipo>?action=delete&softdelete=true`) en ambos modos y hacen fallback a los legacy si el servidor los rechaza.
+- **Límites de transferencia por defecto:** `TransferLimits` pasa a **4 descargas / 2 subidas** por defecto para ambos modos (`WEBDAV_MAX_DOWNLOADS`, `WEBDAV_MAX_UPLOADS`).
+
+### 🛠️ Correcciones
+- **Subidas (`UploadFileToFolder`):** reintentos ante errores transitorios `HTTP >= 500`, `MED-1048` y `PAPI-0000`.
+- **Hyper Backup (`@writer` `.cinfo`):** `isEphemeralEmptyFile` solo purga bloqueos y `@reader`, conservando los archivos de estado `.cinfo` dentro de `@writer`.
+- **Transferencias WebDAV (`transferWriter.WriteHeader`):** propagación limpia de cabeceras en respuestas en streaming.
+
+## [v2.5.1] - 2026-11-15
+
+### 🛡️ Resiliencia ante WAF (403) y Subidas Masivas/Grandes (`#26`, PR `#44`)
+- **Circuit breaker por servidor (`waf_breaker.go`):** al primer `403` de CloudFront, el proxy pausa las llamadas a ese servidor durante 10 min (duplicando el tiempo hasta 2 h si persiste) y responde `503 + Retry-After` a las escrituras que lo necesitan, evitando ráfagas de reintentos que alargan el bloqueo. Los servidores de API (`sapi`) y de subidas (`upload.*`) tienen frenos independientes para que un bloqueo en la API no detenga las subidas.
+- **0 llamadas previas a la API en subidas nuevas:** cuando SQLite ya completó su sincronización inicial, la comprobación previa al `PUT` y en `MKCOL` se resuelve en local (ahorrando 2 llamadas por archivo), y la URL de descarga se consulta solo en la primera lectura (`resolveURL`) en lugar de en cada `PROPFIND` tras el `PUT`.
+- **Renovación de sesión en subidas (`401`):** si una subida en streaming recibe `401`, renueva la sesión aunque el breaker de la API esté en pausa.
+- **Timeout de respuesta en subidas grandes (`UPLOAD_RESPONSE_TIMEOUT_SEC`):** ampliado a **300 s (5 min)** por defecto para evitar cortes a los 60 s cuando Movistar/O2 tarda en confirmar archivos de cientos de MB.
+- **`DeleteFile`:** deja de reintentar `403` si el breaker del WAF ya está activo.
+
+## [v2.5.0] - 2026-11-15
+
+### 🌐 Modo web opcional (`WEB_SESSION=true`, imagen `Dockerfile.web`)
+
+- **Qué es:** alternativa al inicio de sesión del cliente de escritorio. Un Chromium sin pantalla guarda la sesión de la web oficial (`micloud.movistar.es`) y las llamadas a SAPI se hacen desde esa pestaña, con sus cookies, `validationkey` y `X-deviceid: web-…`. Las subidas van directas a `upload.*` con las cookies de la sesión y las descargas por la URL firmada (con `Range`).
+- **Por qué:** cuando CloudFront bloquea el cliente OAuth `omh windows client` (403) o el emparejamiento por SMS no funciona, la web sigue funcionando. Imagen y `docker-compose.web.yml` aparte: el modo normal y su imagen de ~20 MB no cambian.
+- **Inicio de sesión desde el panel:** `/web-login/` muestra la pestaña del Chromium (captura, ratón y teclado) para entrar como en la web. Tarjeta **Sesión web** en el panel.
+- **Renovación automática:** la sesión (`JSESSIONID`) caduca a las 24 h aunque haya actividad. Con «No cerrar sesión» Movistar deja una cookie `PLC` (~90 días) con la que la web reentra sola; el proxy renueva la sesión una hora antes (`WEB_SESSION_RENEW_BEFORE`) con las demás llamadas en espera, porque la `PLC` rota en cada uso y el uso simultáneo la anula.
+- **Como la web:** `acceptasynchronous=true` solo en subidas de más de 200 MiB (`minAsyncUploadFileSizeBytes`); ante `MED-1017` se consulta `get-validation-status`; borrados con `/media/<tipo>?action=delete&softdelete=true` y `/media/folder?action=softdelete` con su cuerpo JSON (y la llamada genérica si se rechazan); `COPY` de WebDAV con la copia en la nube (`/media/file?action=copy`); 2 subidas y 4 descargas simultáneas (`WEBDAV_MAX_UPLOADS`, `WEBDAV_MAX_DOWNLOADS`).
+- **URLs firmadas caducadas:** una lectura por rangos con la URL caducada (403, rango ignorado o cuerpo vacío) pide otra URL y reintenta; antes una lectura larga se colgaba tras unas horas.
+- **Papelera:** vaciado periódico opcional (`WEB_TRASH_EMPTY_EVERY`, desactivado por defecto).
+- **Opciones de la cuenta:** el panel muestra lo que la web lee de `/system/information` (tamaño máximo, límites `FOL-1036`, caducidad de la papelera).
+
+### ⇅ Transferencias en el panel
+
+- Tarjeta con las subidas a la nube y las descargas servidas en curso: nombre, porcentaje, velocidad y tiempo restante. Las lecturas por rangos de un mismo archivo se agrupan y, al terminar, siguen visibles 5 min como «en búfer» (un cliente que lee por rangos puede pasar minutos sin pedir datos).
+
+### 📦 Documentación: configuración recomendada de rclone
+
+- Sección nueva en el `README` con la configuración de `rclone` probada para archivos de más de 4 GB (`chunker` con `name_format = *-chunk###` y `transactions = norename`, sin renombrados ni `423 Locked`) y cifrado opcional con `crypt`, con las notas sobre comentarios en `rclone.conf`, remotos nuevos y la longitud de los nombres.
+
+### 🛠️ Correcciones
+
+- **Nombres de más de 255 caracteres:** SAPI no los rechaza: los guarda recortados a 255 y responde como si todo fuera bien. Con nombres cifrados (rclone `crypt`) el recortado ya no se puede descifrar y el archivo queda invisible, aunque el cliente lo dio por copiado. `PUT`, `MKCOL` y el destino de `MOVE`/`COPY` con un nombre de más de 255 caracteres reciben ahora `400` y el cliente informa del error.
+- **`SQLITE_BUSY` con escrituras concurrentes:** los `PRAGMA` (`busy_timeout`, `journal_mode=WAL`, `synchronous`) se aplicaban solo a una conexión del pool; ahora van en el DSN y valen para todas. Test que reproducía el fallo.
+- **`423 Locked` en peticiones simultáneas sobre la misma ruta** (p. ej. varios `MKCOL` de rclone): `x/net/webdav` pone un bloqueo implícito por petición; el sistema de bloqueos espera hasta 10 s a que se libere un bloqueo implícito en vez de fallar al instante.
+- **`MED-1017` al mover un archivo recién subido:** hasta ~70 s de espera creciente (antes ~10 s, insuficiente para algunos archivos).
+- **`UpdateFolder`** ya no da por buena una respuesta HTTP 200 con un error en el cuerpo; `FOL-1036` (límite de elementos al mover o borrar una carpeta) devuelve un error propio.
+- **Registro:** los «no existe» de `PROPFIND`/`HEAD`/`GET` (comprobaciones normales de rclone y Duplicati antes de subir) ya no se registran como errores.
+- **Panel:** modo oscuro (sigue al sistema o se elige con el botón).
+
+## [v2.4.5] - 2026-11-15
+
+### 🛠️ Caché y Sincronización de Metadatos (`#28`, PR `#42`)
+- **Reanudación de sincronización inicial cortada:** si la sincronización inicial se interrumpe a mitad (por ejemplo por un `403` en un lote de `GetMediaByIDs`) dejando elementos en SQLite sin `last_sync_cursor`, el siguiente ciclo ya no salta el cursor a «ahora» ni da la caché por completa; vuelve a consultar desde `from=0` y descarga únicamente los IDs de carpetas y archivos que aún faltan en la base local (`filterMissing`).
+
 ## [v2.4.4] - 2026-11-14
 
 ### 🛠️ Synology Hyper Backup: Auto-healing de `Control/@writer` y carpetas reales

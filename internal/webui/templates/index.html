@@ -15,9 +15,13 @@
             if (dark) document.documentElement.classList.add('dark');
         })();
     </script>
-    <script src="https://cdn.tailwindcss.com"></script>
+    <!-- 1. Carga externa controlada con CORS y sin Referer -->
+    <link rel="preconnect" href="https://fonts.googleapis.com" crossorigin>
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet" crossorigin="anonymous" referrerpolicy="no-referrer">
+    <script src="https://cdn.tailwindcss.com"  referrerpolicy="no-referrer"></script>
+    <!-- 2. Estilos locales limpios (sin @import externo) -->  
     <style>
-        @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap');
         body { font-family: 'Inter', sans-serif; background-color: #f8fafc; }
         .log-line { font-family: 'ui-monospace', 'SFMono-Regular', monospace; }
         .terminal-box::-webkit-scrollbar { width: 8px; }
@@ -94,8 +98,8 @@
                 <span id="telegram-status-label">Telegram</span>
             </button>
             <span id="proxy-status" class="px-3 py-1.5 bg-slate-100 text-slate-600 font-semibold rounded-full text-xs">⚪ Comprobando...</span>
-            <button onclick="logout()" id="logout-btn" class="w-8 h-8 rounded-full bg-slate-100 hover:bg-rose-50 text-slate-500 hover:text-rose-600 hover:border-rose-200 border border-slate-200 flex items-center justify-center transition shadow-sm" title="Cerrar sesión" aria-label="Cerrar sesión">
-                <svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+            <button onclick="logout()" id="logout-btn" type="button" class="hidden w-8 h-8 rounded-full bg-slate-100 hover:bg-rose-50 text-slate-500 hover:text-rose-600 hover:border-rose-200 border border-slate-200 flex items-center justify-center transition shadow-sm" title="Cerrar sesión" aria-label="Cerrar sesión">
+                <svg class="w-3.5 h-3.5 pointer-events-none" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                     <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M17 16l4-4m0 0l-4-4m4 4H7m6 4v1a3 3 0 01-3 3H6a3 3 0 01-3-3V7a3 3 0 013-3h4a3 3 0 013 3v1" />
                 </svg>
             </button>
@@ -1205,9 +1209,9 @@
         }
 
         function logout() {
-            fetch('/logout', { method: 'POST' }).finally(() => {
-                window.location.href = '/login';
-            });
+            const btn = document.getElementById('logout-btn');
+            if (btn) btn.disabled = true;
+            window.location.href = '/logout';
         }
     </script>
 </body>

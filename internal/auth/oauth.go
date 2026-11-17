@@ -1,7 +1,6 @@
 package auth
 
 import (
-	"crypto/md5"
 	"crypto/rand"
 	"crypto/sha256"
 	"encoding/base64"
@@ -25,8 +24,8 @@ const (
 	OAuthClientSecret = "e22fdd6b-636a-4bfc-bb4a-aa8ed6d131d8"
 	OAuthRedirectURI  = "https://micloud.movistar.es/ui/html/clientoauth.html"
 	ClientPlatform    = "windows"
-	DesktopUserAgent  = "omh windows client 32.1.3.0"
-	SAPIUserAgent     = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/157.0.0.0 Safari/537.36 Edg/157.0.0.0"
+	DesktopUserAgent  = "omh windows client 4.0.1"
+	SAPIUserAgent     = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/133.0.0.0 Safari/537.36"
 	SAPIBaseURL       = "https://micloud.movistar.es/sapi"
 )
 
@@ -40,8 +39,43 @@ func GetSAPIUserAgent() string {
 	if value := strings.TrimSpace(os.Getenv("SAPI_USER_AGENT")); value != "" {
 		return value
 	}
+	if IsDesktopProfile() {
+		return GetDesktopUserAgent()
+	}
 	return SAPIUserAgent
+	// ua, _ := GetSAPIUserAgentInfo()	return ua si se quiere usar función secundaria
 }
+
+// GetSAPIUserAgentInfo devuelve el User-Agent activo y true si se ha modificado
+// mediante SAPI_USER_AGENT respecto a la constante por defecto SAPIUserAgent.
+func GetSAPIUserAgentInfo() (string, bool) {
+	def := SAPIUserAgent
+	if IsDesktopProfile() {
+		def = GetDesktopUserAgent()
+	}
+	if value := strings.TrimSpace(os.Getenv("SAPI_USER_AGENT")); value != "" && value != def {
+		return value, true
+	}
+	return def, false
+}
+
+// DesktopUserAgent permite cambiar DesktopUserAgent.
+func GetDesktopUserAgent() string {
+	if value := strings.TrimSpace(os.Getenv("DESKTOP_USER_AGENT")); value != "" {
+		return value
+	}
+	return DesktopUserAgent
+}
+
+// GetDesktopUserAgentInfo devuelve el User-Agent de escritorio activo y true si
+// se ha modificado mediante DESKTOP_USER_AGENT respecto a DesktopUserAgent original.
+func GetDesktopUserAgentInfo() (string, bool) {
+	if value := strings.TrimSpace(os.Getenv("DESKTOP_USER_AGENT")); value != "" && value != DesktopUserAgent {
+		return value, true
+	}
+	return DesktopUserAgent, false
+}
+
 
 var (
 	authCodeQueryRegex = regexp.MustCompile(`code=([A-Za-z0-9\-_.~]+)`)
@@ -52,6 +86,9 @@ var (
 )
 
 func GetOAuthAuthorizeURL(provider string) string {
+	if env := strings.TrimSpace(os.Getenv("OAUTH_AUTHORIZE_URL")); env != "" {
+		return env
+	}
 	if strings.EqualFold(provider, "o2") {
 		return "https://apiseg.telefonica.es/openid/connect/auth/oauth/v2/o2/cus/authorize"
 	}
@@ -59,6 +96,9 @@ func GetOAuthAuthorizeURL(provider string) string {
 }
 
 func GetOAuthTokenURL(provider string) string {
+	if env := strings.TrimSpace(os.Getenv("OAUTH_TOKEN_URL")); env != "" {
+		return env
+	}
 	if strings.EqualFold(provider, "o2") {
 		return "https://apiseg.telefonica.es/openid/connect/auth/oauth/v2/o2/cus/token"
 	}
@@ -167,6 +207,9 @@ func primeSAPILoginSession(client *http.Client, sessionURL string) (SAPILoginSes
 }
 
 func GetSAPIBaseURL(provider string) string {
+	if env := strings.TrimSpace(os.Getenv("SAPI_BASE_URL")); env != "" {
+		return env
+	}
 	if strings.EqualFold(provider, "o2") {
 		return "https://cloud.o2online.es/sapi"
 	}
@@ -213,6 +256,7 @@ type SAPILoginResult struct {
 	JSessionID          string
 	RefreshedOAuth      *RotatedOAuth
 	LastRefreshDate     int64
+	ResponseTime        int64
 	RawResponse         string
 	RequestURL          string
 	Protocol            string
@@ -256,13 +300,32 @@ func mustRandRead(b []byte) {
 	}
 }
 
+// SanitizeDeviceID adapta el identificador de dispositivo al perfil activo.
+// Perfil "desktop": formato del cliente oficial "fol-<base64>"; un "web-…" heredado
+// se convierte de forma estable. Perfil "browser": "web-…" sin '+', '/', '='.
+func SanitizeDeviceID(devID string) string {
+	devID = strings.TrimSpace(devID)
+	if IsDesktopProfile() {
+		if devID == "" || strings.HasPrefix(devID, "fol-") {
+			return devID
+		}
+		return desktopDeviceIDFrom(devID)
+	}
+	if strings.HasPrefix(devID, "fol-") {
+		clean := strings.TrimPrefix(devID, "fol-")
+		clean = strings.NewReplacer("+", "", "/", "", "=", "").Replace(clean)
+		return "web-" + clean
+	}
+	return devID
+}
+
 func GenerateDeviceID() string {
+	if IsDesktopProfile() {
+		return generateDesktopDeviceID()
+	}
 	b := make([]byte, 16)
 	mustRandRead(b)
-	seed := fmt.Sprintf("PC+%x", b)
-	h := md5.Sum([]byte(seed))
-	b64 := base64.StdEncoding.EncodeToString(h[:])
-	return fmt.Sprintf("fol-%s", b64)
+	return fmt.Sprintf("web-%x", b)
 }
 
 func GeneratePKCE() (verifier, challenge string) {
@@ -350,6 +413,17 @@ func ExtractState(input string) (string, bool) {
 	return "", true
 }
 
+// getOAuthUserAgent devuelve el User-Agent para peticiones OAuth (canje y refresco).
+// Si el usuario especificó explícitamente DESKTOP_USER_AGENT, se respeta; en caso contrario,
+// usa GetSAPIUserAgent() para alinear la cabecera con la huella TLS (uTLS Chrome-133)
+// y los tokens web tanto en Movistar como en O2.
+func getOAuthUserAgent() string {
+	if ua, custom := GetDesktopUserAgentInfo(); custom {
+		return ua
+	}
+	return GetSAPIUserAgent()
+}
+
 func ExchangeCodeForTokens(code, verifier, provider string) (*OAuthTokens, error) {
 	redirectURI := GetOAuthRedirectURI(provider)
 	tokenURL := GetOAuthTokenURL(provider)
@@ -374,7 +448,7 @@ func ExchangeCodeForTokens(code, verifier, provider string) (*OAuthTokens, error
 	basicAuth := base64.StdEncoding.EncodeToString([]byte(fmt.Sprintf("%s:%s", clientID, clientSecret)))
 	req.Header.Set("Authorization", "Basic "+basicAuth)
 	req.Header.Set("Content-Type", "application/x-www-form-urlencoded;charset=UTF-8")
-	req.Header.Set("User-Agent", DesktopUserAgent)
+	req.Header.Set("User-Agent", getOAuthUserAgent())
 
 	resp, err := oauthHTTPClient.Do(req)
 	if err != nil {
@@ -388,7 +462,7 @@ func ExchangeCodeForTokens(code, verifier, provider string) (*OAuthTokens, error
 	}
 
 	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("OAuth token exchange failed (HTTP %d)", resp.StatusCode)
+		return nil, fmt.Errorf("OAuth token exchange failed (HTTP %d): %s", resp.StatusCode, strings.TrimSpace(string(bodyBytes)))
 	}
 
 	var tokens OAuthTokens
@@ -398,47 +472,79 @@ func ExchangeCodeForTokens(code, verifier, provider string) (*OAuthTokens, error
 	return &tokens, nil
 }
 
-func RefreshOAuthToken(refreshToken, provider string) (*OAuthTokens, error) {
-	tokenURL := GetOAuthTokenURL(provider)
-	clientID := GetOAuthClientID(provider)
-	clientSecret := GetOAuthClientSecret(provider)
-
+func doRefreshOAuthTokenRequest(tokenURL, clientID, clientSecret, refreshToken string, includeBodyCreds bool) (*OAuthTokens, int, []byte, error) {
 	data := url.Values{}
 	data.Set("grant_type", "refresh_token")
 	data.Set("refresh_token", refreshToken)
-	data.Set("client_id", clientID)
-	data.Set("client_secret", clientSecret)
+	if includeBodyCreds {
+		data.Set("client_id", clientID)
+		data.Set("client_secret", clientSecret)
+	}
 
 	req, err := http.NewRequest("POST", tokenURL, strings.NewReader(data.Encode()))
 	if err != nil {
-		return nil, err
+		return nil, 0, nil, err
 	}
 
 	basicAuth := base64.StdEncoding.EncodeToString([]byte(fmt.Sprintf("%s:%s", clientID, clientSecret)))
 	req.Header.Set("Authorization", "Basic "+basicAuth)
 	req.Header.Set("Content-Type", "application/x-www-form-urlencoded;charset=UTF-8")
-	req.Header.Set("User-Agent", DesktopUserAgent)
+	req.Header.Set("User-Agent", getOAuthUserAgent())
 
 	resp, err := oauthHTTPClient.Do(req)
 	if err != nil {
-		return nil, err
+		return nil, 0, nil, err
 	}
 	defer resp.Body.Close()
 
 	bodyBytes, err := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
 	if err != nil {
-		return nil, err
+		return nil, resp.StatusCode, nil, err
 	}
 
 	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("OAuth token refresh failed (HTTP %d)", resp.StatusCode)
+		return nil, resp.StatusCode, bodyBytes, nil
 	}
 
 	var tokens OAuthTokens
 	if err := json.Unmarshal(bodyBytes, &tokens); err != nil {
+		return nil, resp.StatusCode, bodyBytes, err
+	}
+	return &tokens, resp.StatusCode, bodyBytes, nil
+}
+
+func RefreshOAuthToken(refreshToken, provider string) (*OAuthTokens, error) {
+	tokenURL := GetOAuthTokenURL(provider)
+	clientID := GetOAuthClientID(provider)
+	clientSecret := GetOAuthClientSecret(provider)
+
+	// Conforme a RFC 6749 §2.3.1, enviamos primero solo Authorization: Basic.
+	tokens, statusCode, bodyBytes, err := doRefreshOAuthTokenRequest(tokenURL, clientID, clientSecret, refreshToken, false)
+	if err != nil {
 		return nil, err
 	}
-	return &tokens, nil
+	if statusCode == http.StatusOK && tokens != nil {
+		return tokens, nil
+	}
+
+	// Fallback de compatibilidad incluyendo client_id y client_secret en el cuerpo
+	if statusCode >= 400 && statusCode != http.StatusTooManyRequests {
+		tokens2, statusCode2, bodyBytes2, err2 := doRefreshOAuthTokenRequest(tokenURL, clientID, clientSecret, refreshToken, true)
+		if err2 != nil {
+			return nil, err2
+		}
+		if statusCode2 == http.StatusOK && tokens2 != nil {
+			return tokens2, nil
+		}
+		statusCode = statusCode2
+		bodyBytes = bodyBytes2
+	}
+
+	summary := summarizeSAPILoginBody(bodyBytes, refreshToken, clientSecret)
+	if summary != "" {
+		return nil, fmt.Errorf("OAuth token refresh failed (HTTP %d): %s", statusCode, summary)
+	}
+	return nil, fmt.Errorf("OAuth token refresh failed (HTTP %d)", statusCode)
 }
 
 func BuildOAuthHeader(accessToken, refreshToken string, lastRefreshDate int64, expiresIn string) string {
@@ -574,11 +680,25 @@ func sapiLoginOAuthRequest(client *http.Client, sapiBaseURL, authorization, user
 	}
 	req.Header.Set("User-Agent", userAgent)
 	req.Header.Set("Accept", "*/*")
-	if deviceID != "" {
-		req.Header.Set("X-deviceid", deviceID)
-	}
-	if deviceName != "" {
-		req.Header.Set("X-devicename", deviceName)
+	if IsDesktopProfile() {
+		// Como el cliente oficial: sin Referer, X-Requested-With ni X-devicename.
+		req.Header.Set("Accept-Language", DesktopAcceptLanguage)
+		req.Header.Set("x-request-id", NewRequestID())
+		if deviceID != "" {
+			req.Header.Set("X-deviceid", SanitizeDeviceID(deviceID))
+		}
+	} else {
+		if parsedEndpoint, parseErr := url.Parse(endpoint); parseErr == nil && parsedEndpoint.Host != "" {
+			req.Header.Set("Referer", parsedEndpoint.Scheme+"://"+parsedEndpoint.Host+"/")
+		}
+		req.Header.Set("X-Requested-With", "XMLHttpRequest")
+		req.Header.Set("Accept-Language", "es-ES,es;q=0.9,en;q=0.8")
+		if deviceID != "" {
+			req.Header.Set("X-deviceid", SanitizeDeviceID(deviceID))
+		}
+		if deviceName != "" {
+			req.Header.Set("X-devicename", deviceName)
+		}
 	}
 
 	resp, err := client.Do(req)
@@ -605,24 +725,47 @@ func sapiLoginOAuthRequest(client *http.Client, sapiBaseURL, authorization, user
 		BodyPreview:         summarizeSAPILoginBody(bodyBytes, previewSecretOne, previewSecretTwo),
 	}
 
-	// 1. Extraer cabecera Authorization rotada si existe
-	if authResp := resp.Header.Get("Authorization"); authResp != "" {
-		result.RefreshedOAuth = ParseOAuthResponseHeader(authResp)
+	// 1. Extraer cabecera Authorization (o WWW-Authenticate / Authentication-Info) rotada si existe
+	for _, h := range []string{"Authorization", "WWW-Authenticate", "Authentication-Info"} {
+		if authResp := resp.Header.Get(h); authResp != "" {
+			if rot := ParseOAuthResponseHeader(authResp); rot != nil {
+				result.RefreshedOAuth = rot
+				break
+			}
+		}
 	}
 
 	// 2. Extraer cookies de sesión
 	for _, cookie := range resp.Cookies() {
 		result.ResponseCookieNames = append(result.ResponseCookieNames, cookie.Name)
-		if cookie.Name == "validationkey" {
+		if strings.EqualFold(cookie.Name, "validationkey") {
 			result.ValidationKey = cookie.Value
-		} else if cookie.Name == "JSESSIONID" {
+		} else if strings.EqualFold(cookie.Name, "JSESSIONID") {
 			result.JSessionID = cookie.Value
+		}
+	}
+	if result.StatusCode == http.StatusOK && client != nil && client.Jar != nil {
+		for _, u := range []*url.URL{req.URL, {Scheme: req.URL.Scheme, Host: req.URL.Host, Path: "/"}} {
+			if u == nil || u.Host == "" {
+				continue
+			}
+			for _, cookie := range client.Jar.Cookies(u) {
+				if result.ValidationKey == "" && strings.EqualFold(cookie.Name, "validationkey") {
+					result.ValidationKey = cookie.Value
+				} else if result.JSessionID == "" && strings.EqualFold(cookie.Name, "JSESSIONID") {
+					result.JSessionID = cookie.Value
+				}
+			}
 		}
 	}
 
 	// 3. Parsear JSON body
 	var bodyMap map[string]interface{}
 	if err := json.Unmarshal(bodyBytes, &bodyMap); err == nil {
+		if errVal, ok := bodyMap["error"]; ok && errVal != nil {
+			result.Error = fmt.Errorf("SAPI login error: %v", errVal)
+		}
+
 		findKey := func(keys ...string) string {
 			for _, k := range keys {
 				if v, ok := bodyMap[k]; ok && v != nil {
@@ -648,14 +791,45 @@ func sapiLoginOAuthRequest(client *http.Client, sapiBaseURL, authorization, user
 			result.JSessionID = findKey("jsessionid", "jsessionId", "JSessionID", "sessionId", "sessionid")
 		}
 
-		if rt := findKey("responsetime", "responseTime", "lastrefreshdate", "lastRefreshDate"); rt != "" {
+		if rt := findKey("responsetime", "responseTime"); rt != "" {
+			var respTime int64
+			fmt.Sscanf(rt, "%d", &respTime)
+			if respTime > 0 {
+				if respTime < 100000000000 {
+					respTime = respTime * 1000
+				}
+				result.ResponseTime = respTime
+			}
+		}
+
+		if lrdStr := findKey("lastrefreshdate", "lastRefreshDate"); lrdStr != "" {
 			var lrd int64
-			fmt.Sscanf(rt, "%d", &lrd)
+			fmt.Sscanf(lrdStr, "%d", &lrd)
 			if lrd > 0 {
 				if lrd < 100000000000 {
 					lrd = lrd * 1000
 				}
 				result.LastRefreshDate = lrd
+			}
+		}
+		if result.LastRefreshDate == 0 && result.ResponseTime > 0 {
+			result.LastRefreshDate = result.ResponseTime
+		}
+
+		if result.RefreshedOAuth == nil {
+			bodyAcc := findKey("accesstoken", "access_token")
+			bodyRef := findKey("refreshtoken", "refresh_token")
+			if bodyAcc != "" || bodyRef != "" {
+				exp := findKey("expiresin", "expires_in")
+				if exp == "" {
+					exp = "3600"
+				}
+				result.RefreshedOAuth = &RotatedOAuth{
+					AccessToken:     bodyAcc,
+					RefreshToken:    bodyRef,
+					ExpiresIn:       exp,
+					LastRefreshDate: result.LastRefreshDate,
+				}
 			}
 		}
 	}

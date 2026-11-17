@@ -282,6 +282,11 @@ type Client struct {
 	pacingMu       sync.Mutex
 	lastReqTime    time.Time
 	pacingInterval time.Duration
+
+	refreshFn func() bool // solo para pruebas: sustituye a RefreshSession (que llama a O2 de verdad)
+
+	waf       wafBreaker // pausa las llamadas a la API de O2 tras un 403 del cortafuegos (waf_breaker.go)
+	wafUpload wafBreaker // pausa las subidas (servidor de subidas) tras un 403 del cortafuegos en ese servidor
 }
 
 // ErrFileTooLarge se devuelve cuando SAPI rechaza un archivo por superar el tamaño máximo permitido (MED-1020).
@@ -292,18 +297,15 @@ var ErrFileTooLarge = errors.New("SAPI MED-1020: file size exceeds configured ma
 var ErrSessionRefreshTransient = errors.New("SAPI session refresh temporarily failed")
 
 func NewClient(cfg config.AccountConfig) (*Client, error) {
-	jar, err := cookiejar.New(nil)
-	if err != nil {
-		return nil, err
-	}
-
 	// Transporte HTTP/2 con ClientHello emitido por uTLS, imitando un navegador
 	// convencional para no disparar el AWS CloudFront WAF Bot Control (403).
 	transport := auth.NewFingerprintedTransport()
 	logger.Log("[SAPI] 🔐 Huella TLS (uTLS): %s", auth.FingerprintName())
 
+	// No usamos CookieJar automático en httpClient para evitar que respuestas 401/403
+	// HTML de SAPI inyecten cookies anónimas o duplicadas: las cabeceras Cookie de
+	// sesión (JSESSIONID / validationkey) se gestionan explícitamente desde c.cfg.
 	httpClient := &http.Client{
-		Jar:       jar,
 		Transport: transport,
 		Timeout:   0,
 	}
@@ -398,6 +400,11 @@ func (c *Client) syncCookiesLocked() {
 			Value:  c.cfg.ValidationKey,
 			Path:   "/",
 			Domain: cookieDomain,
+		}, &http.Cookie{
+			Name:   "validationKey",
+			Value:  c.cfg.ValidationKey,
+			Path:   "/",
+			Domain: cookieDomain,
 		})
 	}
 	if c.cfg.JSessionID != "" {
@@ -468,15 +475,19 @@ func (c *Client) appendValidationKey(rawURL string) string {
 	vk := c.cfg.ValidationKey
 	c.mu.RUnlock()
 
-	if vk == "" || strings.Contains(rawURL, "validationkey=") {
+	if vk == "" {
 		return rawURL
 	}
 
-	sep := "?"
-	if strings.Contains(rawURL, "?") {
-		sep = "&"
+	parsed, err := url.Parse(rawURL)
+	if err != nil {
+		return rawURL
 	}
-	return rawURL + sep + "validationkey=" + url.QueryEscape(vk)
+
+	q := parsed.Query()
+	q.Set("validationkey", vk)
+	parsed.RawQuery = q.Encode()
+	return parsed.String()
 }
 
 func (c *Client) processSAPIResponse(resp *http.Response) bool {
@@ -488,7 +499,11 @@ func (c *Client) processSAPIResponse(resp *http.Response) bool {
 		return false
 	}
 
+	isUploadHost := resp.Request != nil && resp.Request.URL != nil &&
+		strings.HasPrefix(strings.ToLower(resp.Request.URL.Hostname()), "upload.")
+
 	var changed bool
+	var tokensRotated bool
 	c.mu.Lock()
 
 	// 1. Cabecera Authorization devuelta con tokens rotados
@@ -497,14 +512,26 @@ func (c *Client) processSAPIResponse(resp *http.Response) bool {
 			if rotated.AccessToken != "" && rotated.AccessToken != c.cfg.AccessToken {
 				c.cfg.AccessToken = rotated.AccessToken
 				changed = true
+				tokensRotated = true
 			}
 			if rotated.RefreshToken != "" && rotated.RefreshToken != c.cfg.RefreshToken {
 				c.cfg.RefreshToken = rotated.RefreshToken
 				changed = true
+				tokensRotated = true
 			}
 			if rotated.LastRefreshDate > 0 && rotated.LastRefreshDate != c.cfg.LastRefreshDate {
 				c.cfg.LastRefreshDate = rotated.LastRefreshDate
 				changed = true
+			} else if rotated.LastRefreshDate <= 0 && rotated.AccessToken != "" && resp.StatusCode < 400 && auth.IsDesktopProfile() {
+				// Así renueva el cliente oficial de escritorio: cuando
+				// lastrefreshdate + expiresin ya ha pasado, envía la petición igual y
+				// SAPI responde 200 con una cabecera Authorization (en la captura,
+				// con los mismos tokens y sin lastrefreshdate). El cliente guarda lo
+				// recibido y pone lastrefreshdate a la hora de esa respuesta. Nunca
+				// llama a apiseg.telefonica.es para renovar.
+				c.cfg.LastRefreshDate = time.Now().UnixMilli()
+				changed = true
+				tokensRotated = true
 			}
 			if rotated.ExpiresIn != "" && rotated.ExpiresIn != c.cfg.ExpiresIn {
 				c.cfg.ExpiresIn = rotated.ExpiresIn
@@ -513,20 +540,42 @@ func (c *Client) processSAPIResponse(resp *http.Response) bool {
 		}
 	}
 
-	// 2. Cookies de sesión
-	for _, cookie := range resp.Cookies() {
-		if strings.EqualFold(cookie.Name, "validationkey") && cookie.Value != "" && cookie.Value != c.cfg.ValidationKey {
-			c.cfg.ValidationKey = cookie.Value
-			changed = true
-		} else if strings.EqualFold(cookie.Name, "JSESSIONID") && cookie.Value != "" && cookie.Value != c.cfg.JSessionID {
-			c.cfg.JSessionID = cookie.Value
-			changed = true
+	// Si la sesión fue marcada como expirada/revocada y esta respuesta no trae nuevos tokens OAuth,
+	// no capturar cookies ni avanzar LastRefreshDate desde descargas CDN o respuestas cacheadas.
+	if !c.sessionExpired || tokensRotated {
+		// 2. Cookies de sesión (solo en respuestas < 400 para no capturar cookies
+		// anónimas de páginas HTML de error 401/403 como si fueran una sesión autenticada;
+		// además, no sobrescribir una JSESSIONID activa de SAPI desde el host de subidas upload.*)
+		if resp.StatusCode < 400 {
+			for _, cookie := range resp.Cookies() {
+				if strings.EqualFold(cookie.Name, "validationkey") && cookie.Value != "" && cookie.Value != c.cfg.ValidationKey {
+					c.cfg.ValidationKey = cookie.Value
+					changed = true
+				} else if strings.EqualFold(cookie.Name, "JSESSIONID") && cookie.Value != "" && cookie.Value != c.cfg.JSessionID && !(isUploadHost && c.cfg.JSessionID != "") {
+					c.cfg.JSessionID = cookie.Value
+					changed = true
+				}
+			}
+		}
+
+		// 3. Ventana deslizante de LastRefreshDate: SAPI rechaza cabeceras oauth cuando
+		// (now - lastrefreshdate) supera expiresin (3600s). Durante copias largas (>= 1h),
+		// si las peticiones 2xx siguen siendo válidas y han pasado > 25 min, refrescamos el timestamp.
+		// En el perfil "desktop" no se usa: el cliente oficial mantiene la fecha real
+		// y SAPI la renueva con la cabecera Authorization de la respuesta.
+		if resp.StatusCode >= 200 && resp.StatusCode < 300 && c.cfg.AccessToken != "" && !auth.IsDesktopProfile() {
+			if c.cfg.LastRefreshDate > 1750000000000 && time.Since(time.UnixMilli(c.cfg.LastRefreshDate)) > 25*time.Minute {
+				c.cfg.LastRefreshDate = time.Now().UnixMilli()
+				changed = true
+			}
 		}
 	}
 
 	if changed {
 		c.syncCookiesLocked()
-		c.sessionExpired = false
+		if tokensRotated {
+			c.sessionExpired = false
+		}
 	}
 	cfgCopy := c.cfg
 	c.mu.Unlock()
@@ -538,7 +587,70 @@ func (c *Client) processSAPIResponse(resp *http.Response) bool {
 	return changed
 }
 
+func summarizeHTTPErrorBody(b []byte) string {
+	s := strings.TrimSpace(strings.ToValidUTF8(string(b), "?"))
+	if s == "" {
+		return ""
+	}
+	lower := strings.ToLower(s)
+	if strings.Contains(lower, "<!doctype html") || strings.Contains(lower, "<html") || strings.HasPrefix(lower, "<!--?xml") {
+		title := ""
+		if start := strings.Index(lower, "<title>"); start != -1 {
+			rest := s[start+len("<title>"):]
+			restLower := lower[start+len("<title>"):]
+			if end := strings.Index(restLower, "</title>"); end != -1 {
+				title = strings.Join(strings.Fields(rest[:end]), " ")
+			}
+		}
+		if title != "" {
+			return fmt.Sprintf("HTML error page (title=%q, %d bytes)", title, len(b))
+		}
+		return fmt.Sprintf("HTML error page (%d bytes)", len(b))
+	}
+	collapsed := strings.Join(strings.Fields(s), " ")
+	const maxRunes = 240
+	runes := []rune(collapsed)
+	if len(runes) > maxRunes {
+		return string(runes[:maxRunes]) + "…"
+	}
+	return collapsed
+}
+
+func isLoopbackURL(raw string) bool {
+	u, err := url.Parse(raw)
+	if err != nil {
+		return false
+	}
+	h := strings.ToLower(u.Hostname())
+	return h == "127.0.0.1" || h == "localhost" || h == "::1"
+}
+
+func (c *Client) newSAPILoginClient(sapiBase, provider string) (*http.Client, string) {
+	if !isLoopbackURL(sapiBase) {
+		if loginClient, primedJSess, err := auth.NewSAPILoginSession(provider); err == nil && loginClient != nil {
+			return loginClient, primedJSess
+		}
+	}
+	jar, _ := cookiejar.New(nil)
+	var transport http.RoundTripper
+	var timeout time.Duration
+	if c.httpClient != nil {
+		transport = c.httpClient.Transport
+		timeout = c.httpClient.Timeout
+	}
+	return &http.Client{
+		Transport: transport,
+		Timeout:   timeout,
+		Jar:       jar,
+	}, ""
+}
+
 func (c *Client) RefreshSession() bool {
+	ok, _ := c.refreshSessionInternal(false)
+	return ok
+}
+
+func (c *Client) refreshSessionInternal(forceOAuth bool) (bool, bool) {
 	c.refreshMu.Lock()
 	defer c.refreshMu.Unlock()
 
@@ -550,20 +662,21 @@ func (c *Client) RefreshSession() bool {
 		// Si caducó, hay que volver a iniciarla desde el panel.
 		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 		defer cancel()
-		return ws.CheckLogin(ctx)
+		return ws.CheckLogin(ctx), false
 	}
 
 	c.mu.RLock()
 	cfg := c.cfg
 	alreadyExpired := c.sessionExpired
+	lastRefresh := c.cfg.LastRefreshDate
 	c.mu.RUnlock()
 
 	if alreadyExpired {
-		return false
+		return false, false
 	}
 
 	if cfg.AccessToken == "" && cfg.RefreshToken == "" {
-		return false
+		return false, false
 	}
 
 	logger.Log("[OAuth] 🔄 Renovando sesión SAPI...")
@@ -572,15 +685,28 @@ func (c *Client) RefreshSession() bool {
 	c.mu.Unlock()
 
 	// 1. Intento primario: SAPILoginOAuth con access_token actual
-	sapiBase := auth.GetSAPIBaseURL(cfg.Provider)
-	if cfg.AccessToken != "" {
-		res := auth.SAPILoginOAuth(c.httpClient, sapiBase, cfg.AccessToken, cfg.RefreshToken, cfg.DeviceID, cfg.DeviceName, cfg.LastRefreshDate, cfg.ExpiresIn)
+	c.mu.RLock()
+	sapiBase := c.baseURL
+	c.mu.RUnlock()
+	if sapiBase == "" {
+		sapiBase = auth.GetSAPIBaseURL(cfg.Provider)
+	}
+
+	if !forceOAuth && cfg.AccessToken != "" {
+		wasStaleLRD := cfg.LastRefreshDate > 1750000000000 && time.Since(time.UnixMilli(cfg.LastRefreshDate)) > 45*time.Minute
+		loginLRD := cfg.LastRefreshDate
+		if loginLRD <= 0 || wasStaleLRD {
+			loginLRD = time.Now().UnixMilli()
+		}
+		loginClient, primedJSess := c.newSAPILoginClient(sapiBase, cfg.Provider)
+		res := auth.SAPILoginOAuth(loginClient, sapiBase, cfg.AccessToken, cfg.RefreshToken, cfg.DeviceID, cfg.DeviceName, loginLRD, cfg.ExpiresIn)
 		// Un 200 con cookies NO garantiza que el access_token siga siendo válido:
 		// SAPI puede devolver cookies de sesión y un cuerpo de error. Exigimos además
-		// evidencia de una sesión OAuth real (credenciales rotadas o responsetime) para
-		// no dar por buena una renovación falsa y quedarnos en bucle de 401.
-		if res.StatusCode == http.StatusOK && (res.ValidationKey != "" || res.JSessionID != "") &&
-			(res.RefreshedOAuth != nil || res.LastRefreshDate > 0) {
+		// evidencia de una sesión OAuth real (credenciales rotadas o validationkey sin error),
+		// haber obtenido por primera vez la JSESSIONID en arranque en frío, o estar renovando
+		// una sesión cuya marca LastRefreshDate superó los 45 minutos.
+		hasSession := res.ValidationKey != "" || res.RefreshedOAuth != nil || (cfg.JSessionID == "" && primedJSess != "") || (wasStaleLRD && (res.JSessionID != "" || primedJSess != ""))
+		if res.StatusCode == http.StatusOK && res.Error == nil && hasSession {
 			c.mu.Lock()
 			c.sessionExpired = false
 			if res.ValidationKey != "" {
@@ -588,9 +714,15 @@ func (c *Client) RefreshSession() bool {
 			}
 			if res.JSessionID != "" {
 				c.cfg.JSessionID = res.JSessionID
+			} else if primedJSess != "" && (c.cfg.JSessionID == "" || wasStaleLRD) {
+				c.cfg.JSessionID = primedJSess
 			}
 			if res.LastRefreshDate > 0 {
 				c.cfg.LastRefreshDate = res.LastRefreshDate
+			} else if res.ResponseTime > 0 {
+				c.cfg.LastRefreshDate = res.ResponseTime
+			} else if wasStaleLRD || c.cfg.LastRefreshDate <= 0 {
+				c.cfg.LastRefreshDate = loginLRD
 			}
 			if res.RefreshedOAuth != nil {
 				if res.RefreshedOAuth.AccessToken != "" {
@@ -605,9 +737,36 @@ func (c *Client) RefreshSession() bool {
 			c.mu.Unlock()
 
 			_ = config.SaveAccountConfig(cfgCopy)
-			logger.Log("[OAuth] ✔ Sesión SAPI refrescada con éxito.")
-			return true
+			logger.Log("[OAuth] ✔ Sesión SAPI refrescada con éxito (%s).", cfgCopy.Provider)
+			return true, false
 		}
+		logger.Log("[OAuth] ℹ️ Paso 1 (SAPILoginOAuth) no renovó sesión para %s (HTTP %d, vk=%v, js=%v, err=%v); escalando a Paso 2...", cfg.Provider, res.StatusCode, res.ValidationKey != "", res.JSessionID != "" || primedJSess != "", res.Error)
+	}
+
+	// Evitar rotar el refresh_token repetidamente si ya se renovó recientemente (<30s)
+	// y ya existe una sesión (JSESSIONID/validationkey) activa. Devolvemos usedStep2=true
+	// para impedir que doRequestLocked escale a forceOAuth=true saltándose el cooldown.
+	if !forceOAuth && lastRefresh > 0 && time.Since(time.UnixMilli(lastRefresh)) < 30*time.Second && (cfg.ValidationKey != "" || cfg.JSessionID != "") {
+		logger.Log("[OAuth] ℹ️ Tokens renovados recientemente (<30s). Omitiendo rotación redundante de refresh_token.")
+		return true, true
+	}
+
+	// El cliente oficial de escritorio nunca renueva en apiseg.telefonica.es: quien
+	// rota los tokens es SAPI (cabecera Authorization de sus respuestas). Canjear el
+	// refresh_token por nuestra cuenta compite con esa rotación y acaba en
+	// "invalid_request / Invalid Token". En el perfil "desktop" solo se hace si se
+	// pide expresamente con OAUTH_REFRESH_FALLBACK=true.
+	if !apisegRefreshAllowed() {
+		c.mu.Lock()
+		wasExpired := c.sessionExpired
+		c.sessionExpired = true
+		c.refreshTransient = false
+		c.mu.Unlock()
+		logger.Log("[!] ⚠️ SAPI rechaza la sesión y el perfil de escritorio no renueva en apiseg (OAUTH_REFRESH_FALLBACK desactivado). Revincula la cuenta desde el panel web.")
+		if !wasExpired && c.OnSessionExpired != nil {
+			go c.OnSessionExpired(errors.New("sesión expirada (HTTP 401)"))
+		}
+		return false, true
 	}
 
 	// 2. Si falla o expiró, canjear refresh_token en apiseg.telefonica.es.
@@ -647,23 +806,22 @@ func (c *Client) RefreshSession() bool {
 			// Persistir inmediatamente los nuevos tokens para proteger contra RTR (Refresh Token Rotation)
 			_ = config.SaveAccountConfig(cfgCopy)
 
-			// Con nuevo access_token, inicializar SAPI. Reintentamos el login
-			// (sin volver a rotar el refresh_token) por si el 401 es puntual.
+			// Con nuevo access_token, inicializar SAPI tanto para Movistar como para O2
+			// para autenticar la cookie JSESSIONID antes de las llamadas SAPI.
+			loginClient, primedJSess := c.newSAPILoginClient(sapiBase, cfgCopy.Provider)
+
 			var res auth.SAPILoginResult
 			for attempt := 0; attempt < 3; attempt++ {
-				res = auth.SAPILoginOAuth(c.httpClient, sapiBase, tokens.AccessToken, cfgCopy.RefreshToken, cfgCopy.DeviceID, cfgCopy.DeviceName, cfgCopy.LastRefreshDate, cfgCopy.ExpiresIn)
-				if res.StatusCode == http.StatusOK {
-					break
-				}
-				if res.StatusCode != http.StatusUnauthorized {
+				res = auth.SAPILoginOAuth(loginClient, sapiBase, tokens.AccessToken, cfgCopy.RefreshToken, cfgCopy.DeviceID, cfgCopy.DeviceName, cfgCopy.LastRefreshDate, cfgCopy.ExpiresIn)
+				if res.StatusCode == http.StatusOK && res.Error == nil {
 					break
 				}
 				if attempt < 2 {
-					logger.Log("[OAuth] ⏳ SAPI devolvió 401 tras refresco; reintentando login en %v...", time.Duration(attempt+1)*time.Second)
+					logger.Log("[OAuth] ⏳ SAPI devolvió %d tras refresco; reintentando login en %v...", res.StatusCode, time.Duration(attempt+1)*time.Second)
 					time.Sleep(time.Duration(attempt+1) * time.Second)
 				}
 			}
-			if res.StatusCode == http.StatusOK {
+			if res.StatusCode == http.StatusOK && res.Error == nil {
 				c.mu.Lock()
 				c.sessionExpired = false
 				if res.ValidationKey != "" {
@@ -671,6 +829,8 @@ func (c *Client) RefreshSession() bool {
 				}
 				if res.JSessionID != "" {
 					c.cfg.JSessionID = res.JSessionID
+				} else if primedJSess != "" {
+					c.cfg.JSessionID = primedJSess
 				}
 				if res.LastRefreshDate > 0 {
 					c.cfg.LastRefreshDate = res.LastRefreshDate
@@ -688,25 +848,23 @@ func (c *Client) RefreshSession() bool {
 				c.mu.Unlock()
 
 				_ = config.SaveAccountConfig(cfgCopy2)
-				logger.Log("[OAuth] ✔ Tokens renovados y sesión SAPI inicializada con éxito.")
-				return true
+				logger.Log("[OAuth] ✔ Tokens renovados y sesión SAPI inicializada con éxito (%s).", cfgCopy.Provider)
+				return true, true
 			}
-			if res.StatusCode == http.StatusUnauthorized {
-				c.mu.Lock()
-				c.sessionExpired = true
-				c.refreshTransient = false
-				c.mu.Unlock()
-				logger.Log("[!] ⚠️ Tokens renovados pero SAPI rechaza la sesión (401). Revincula la cuenta desde el panel web para evitar rotaciones inútiles del refresh_token.")
-				if c.OnSessionExpired != nil {
-					go c.OnSessionExpired(errors.New("sesión SAPI rechazada tras refresco (HTTP 401)"))
-				}
-				return false
-			}
-			logger.Log("[OAuth] ⚠️ Inicialización SAPI devolvió HTTP %d tras refresco: %v", res.StatusCode, res.Error)
+			// Si SAPI devolvió error tras renovar tokens en apiseg, no marcamos la sesión
+			// como expirada permanentemente: el access_token recién emitido es válido y se
+			// permite que las peticiones continúen con él (conservando la JSESSIONID preparada).
+			logger.Log("[OAuth] ⚠️ Inicialización SAPI devolvió HTTP %d tras refresco OAuth (%v) para %s. Continuando con nuevo access_token...", res.StatusCode, res.Error, cfgCopy.Provider)
 			c.mu.Lock()
-			c.refreshTransient = true
+			c.sessionExpired = false
+			if primedJSess != "" && c.cfg.JSessionID == "" {
+				c.cfg.JSessionID = primedJSess
+			}
+			c.syncCookiesLocked()
+			cfgCopy2 := c.cfg
 			c.mu.Unlock()
-			return false
+			_ = config.SaveAccountConfig(cfgCopy2)
+			return true, true
 		} else if refreshErr != nil {
 			logger.Log("[OAuth] ❌ Error canjeando refresh_token: %v", refreshErr)
 		}
@@ -731,7 +889,16 @@ func (c *Client) RefreshSession() bool {
 		}
 		logger.Log("[!] ⚠️ Error transitorio durante renovación de sesión. Conservando credenciales para futuros reintentos.")
 	}
-	return false
+	return false, true
+}
+
+// apisegRefreshAllowed indica si se puede canjear el refresh_token en apiseg:
+// siempre en el perfil "browser"; en "desktop", solo con OAUTH_REFRESH_FALLBACK=true.
+func apisegRefreshAllowed() bool {
+	if !auth.IsDesktopProfile() {
+		return true
+	}
+	return strings.EqualFold(strings.TrimSpace(os.Getenv("OAUTH_REFRESH_FALLBACK")), "true")
 }
 
 func isTerminalRefreshError(err error) bool {
@@ -779,10 +946,38 @@ func (c *Client) releaseSlot() {
 	}
 }
 
+func (c *Client) refreshSession() bool {
+	ok, _ := c.refreshSessionWithMode(false)
+	return ok
+}
+
+func (c *Client) refreshSessionWithMode(forceOAuth bool) (bool, bool) {
+	if c.refreshFn != nil {
+		return c.refreshFn(), true
+	}
+	return c.refreshSessionInternal(forceOAuth)
+}
+
 func (c *Client) DoRequest(req *http.Request) (*http.Response, error) {
+	freno, que, quien := c.breakerFor(req)
+	if until := freno.blockedUntil(); !until.IsZero() {
+		return nil, wafBlockedError(until, req.Method, req.URL.Path)
+	}
 	c.acquireSlot()
 	defer c.releaseSlot()
-	return c.doRequestLocked(req)
+	// Las peticiones que esperaban turno cuando saltó el bloqueo tampoco se envían.
+	if until := freno.blockedUntil(); !until.IsZero() {
+		return nil, wafBlockedError(until, req.Method, req.URL.Path)
+	}
+	resp, err := c.doRequestLocked(req)
+	if err == nil && resp != nil {
+		if isWAFBlockResponse(resp) {
+			freno.trip(que)
+		} else if resp.StatusCode < 500 {
+			freno.ok(quien)
+		}
+	}
+	return resp, err
 }
 
 func (c *Client) doRequestLocked(req *http.Request) (*http.Response, error) {
@@ -791,29 +986,43 @@ func (c *Client) doRequestLocked(req *http.Request) (*http.Response, error) {
 	c.mu.RUnlock()
 
 	// Inyectar cabeceras comunes
+	desktop := auth.IsDesktopProfile()
 	userAgent := auth.GetSAPIUserAgent()
 	req.Header.Set("User-Agent", userAgent)
 	if req.Header.Get("Accept") == "" {
 		req.Header.Set("Accept", "*/*")
 	}
-	if cfg.DeviceID != "" {
-		req.Header.Set("X-deviceid", cfg.DeviceID)
+	if desktop {
+		// Mismas cabeceras que el cliente oficial de escritorio (sin Referer,
+		// X-Requested-With ni X-devicename; x-request-id por petición).
+		if req.Header.Get("Accept-Language") == "" {
+			req.Header.Set("Accept-Language", auth.DesktopAcceptLanguage)
+		}
+		if req.Header.Get("x-request-id") == "" {
+			req.Header.Set("x-request-id", auth.NewRequestID())
+		}
+	} else {
+		if req.Header.Get("Referer") == "" && req.URL != nil && req.URL.Host != "" {
+			req.Header.Set("Referer", req.URL.Scheme+"://"+req.URL.Host+"/")
+		}
+		if req.Header.Get("X-Requested-With") == "" {
+			req.Header.Set("X-Requested-With", "XMLHttpRequest")
+		}
+		if req.Header.Get("Accept-Language") == "" {
+			req.Header.Set("Accept-Language", "es-ES,es;q=0.9,en;q=0.8")
+		}
 	}
-	if cfg.DeviceName != "" {
+	if cfg.DeviceID != "" {
+		req.Header.Set("X-deviceid", auth.SanitizeDeviceID(cfg.DeviceID))
+	}
+	if cfg.DeviceName != "" && !desktop {
 		req.Header.Set("X-devicename", cfg.DeviceName)
 	}
 	if cfg.AccessToken != "" {
 		req.Header.Set("Authorization", auth.BuildOAuthHeader(cfg.AccessToken, cfg.RefreshToken, cfg.LastRefreshDate, cfg.ExpiresIn))
 	}
 	if req.Header.Get("Cookie") == "" && (cfg.ValidationKey != "" || cfg.JSessionID != "") {
-		var parts []string
-		if cfg.JSessionID != "" {
-			parts = append(parts, "JSESSIONID="+cfg.JSessionID)
-		}
-		if cfg.ValidationKey != "" {
-			parts = append(parts, "validationkey="+cfg.ValidationKey)
-		}
-		req.Header.Set("Cookie", strings.Join(parts, "; "))
+		req.Header.Set("Cookie", sessionCookieHeader(cfg.JSessionID, cfg.ValidationKey))
 	}
 
 	// Asegurar validationkey en la URL si no está presente
@@ -845,56 +1054,40 @@ func (c *Client) doRequestLocked(req *http.Request) (*http.Response, error) {
 
 	if resp.StatusCode == http.StatusUnauthorized {
 		if req.Body != nil && req.GetBody == nil {
+			// Cuerpo en flujo (una subida): no se puede repetir aquí, pero sí renovar la sesión
+			// para que el reintento del llamante (la subida desde disco) ya vaya con credenciales
+			// válidas. Antes solo la renovaban las llamadas a la API; con la API en pausa por el
+			// WAF nadie la renovaba y cada subida daba 401 (12/11/2026).
+			if !credentialsRotated && c.HasCredentials() && !c.IsSessionExpired() {
+				c.refreshSession()
+			}
 			return resp, nil
 		}
 		if c.HasCredentials() && !c.IsSessionExpired() {
 			bodyBytes, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
 			resp.Body.Close()
-			if c.RefreshSession() {
-				// Reintentar petición con nuevas credenciales
-				c.mu.RLock()
-				newCfg := c.cfg
-				c.mu.RUnlock()
-
-				var retryBody io.Reader
-				if req.GetBody != nil {
-					rb, err := req.GetBody()
-					if err != nil {
-						resp.Body = io.NopCloser(bytes.NewReader(bodyBytes))
-						return resp, err
+			if ok, usedStep2 := c.refreshSessionWithMode(false); ok {
+				resp2, err2 := c.retryRequestWithCurrentConfig(req)
+				if err2 == nil && resp2.StatusCode == http.StatusUnauthorized && !usedStep2 {
+					_, _ = io.Copy(io.Discard, io.LimitReader(resp2.Body, 4096))
+					_ = resp2.Body.Close()
+					if ok2, _ := c.refreshSessionWithMode(true); ok2 {
+						resp2, err2 = c.retryRequestWithCurrentConfig(req)
+					} else {
+						resp2 = nil
+						err2 = nil
 					}
-					retryBody = rb
 				}
-
-				newReq, err := http.NewRequest(req.Method, req.URL.String(), retryBody)
-				if err != nil {
-					resp.Body = io.NopCloser(bytes.NewReader(bodyBytes))
-					return resp, err
-				}
-				newReq.Header = req.Header.Clone()
-				newReq.Header.Set("Authorization", auth.BuildOAuthHeader(newCfg.AccessToken, newCfg.RefreshToken, newCfg.LastRefreshDate, newCfg.ExpiresIn))
-				if newCfg.ValidationKey != "" || newCfg.JSessionID != "" {
-					var parts []string
-					if newCfg.JSessionID != "" {
-						parts = append(parts, "JSESSIONID="+newCfg.JSessionID)
-					}
-					if newCfg.ValidationKey != "" {
-						parts = append(parts, "validationkey="+newCfg.ValidationKey)
-					}
-					newReq.Header.Set("Cookie", strings.Join(parts, "; "))
-				}
-				newReq.URL, _ = url.Parse(c.appendValidationKey(newReq.URL.String()))
-
-				resp2, err2 := c.httpClient.Do(newReq)
-				if err2 == nil {
-					c.processSAPIResponse(resp2)
+				if err2 == nil && resp2 != nil {
 					return resp2, nil
 				}
-				var urlErr *url.Error
-				if errors.As(err2, &urlErr) && urlErr.Err != nil {
-					return resp2, fmt.Errorf("SAPI retry failed (%s %s): %w", newReq.Method, newReq.URL.Path, urlErr.Err)
+				if err2 != nil {
+					var urlErr *url.Error
+					if errors.As(err2, &urlErr) && urlErr.Err != nil {
+						return resp2, fmt.Errorf("SAPI retry failed (%s %s): %w", req.Method, req.URL.Path, urlErr.Err)
+					}
+					return resp2, err2
 				}
-				return resp2, err2
 			}
 			if c.RefreshTransient() {
 				return nil, fmt.Errorf("%w (%s %s)", ErrSessionRefreshTransient, req.Method, req.URL.Path)
@@ -950,6 +1143,21 @@ func (c *Client) doRequestLocked(req *http.Request) (*http.Response, error) {
 	return resp, nil
 }
 
+// sessionCookieHeader construye la cabecera Cookie de sesión. El cliente oficial de
+// escritorio envía solo JSESSIONID (la validationkey va en la URL); el perfil
+// "browser" añade además validationKey/validationkey como la web.
+func sessionCookieHeader(jsessionID, validationKey string) string {
+	var parts []string
+	if jsessionID != "" {
+		parts = append(parts, "JSESSIONID="+jsessionID)
+	}
+	if validationKey != "" && (!auth.IsDesktopProfile() || jsessionID == "") {
+		parts = append(parts, "validationKey="+validationKey)
+		parts = append(parts, "validationkey="+validationKey)
+	}
+	return strings.Join(parts, "; ")
+}
+
 func (c *Client) retryRequestWithCurrentConfig(req *http.Request) (*http.Response, error) {
 	cfg := c.GetConfig()
 	var retryBody io.Reader
@@ -971,14 +1179,7 @@ func (c *Client) retryRequestWithCurrentConfig(req *http.Request) (*http.Respons
 		newReq.Header.Set("Authorization", auth.BuildOAuthHeader(cfg.AccessToken, cfg.RefreshToken, cfg.LastRefreshDate, cfg.ExpiresIn))
 	}
 	if cfg.JSessionID != "" || cfg.ValidationKey != "" {
-		var cookies []string
-		if cfg.JSessionID != "" {
-			cookies = append(cookies, "JSESSIONID="+cfg.JSessionID)
-		}
-		if cfg.ValidationKey != "" {
-			cookies = append(cookies, "validationkey="+cfg.ValidationKey)
-		}
-		newReq.Header.Set("Cookie", strings.Join(cookies, "; "))
+		newReq.Header.Set("Cookie", sessionCookieHeader(cfg.JSessionID, cfg.ValidationKey))
 	}
 	newReq.URL, _ = url.Parse(c.appendValidationKey(newReq.URL.String()))
 	resp, err := c.httpClient.Do(newReq)
@@ -1504,19 +1705,17 @@ func (c *Client) UpdateFolder(folderID int64, name string, parentID int64) error
 var ErrFolderUpdatesLimit = errors.New("la carpeta supera el límite de elementos por operación de Movistar Cloud (FOL-1036)")
 
 func (c *Client) DeleteFolder(folderID int64, permanent bool) error {
-	if c.WebMode() {
-		err := c.deleteFolderWeb(folderID, permanent)
-		if err == nil || errors.Is(err, ErrFolderUpdatesLimit) {
-			return err
-		}
-		logger.Log("[SAPI] ↪ Borrado de la carpeta %d rechazado como en la web (%v); se usa la llamada genérica.", folderID, err)
+	err := c.deleteFolderModern(folderID, permanent)
+	if err == nil || errors.Is(err, ErrFolderUpdatesLimit) {
+		return err
 	}
+	logger.Log("[SAPI] ↪ Borrado moderno de la carpeta %d rechazado (%v); se usa la llamada genérica.", folderID, err)
 	return c.deleteFolderLegacy(folderID, permanent)
 }
 
-// deleteFolderWeb borra como la web: a la papelera con action=softdelete y
+// deleteFolderModern borra usando el endpoint moderno: a la papelera con action=softdelete y
 // {"data":{"ids":[id]}}, o definitivamente con action=delete y {"data":{"folders":[id]}}.
-func (c *Client) deleteFolderWeb(folderID int64, permanent bool) error {
+func (c *Client) deleteFolderModern(folderID int64, permanent bool) error {
 	action, key := "softdelete", "ids"
 	if permanent {
 		action, key = "delete", "folders"
@@ -1552,6 +1751,10 @@ func (c *Client) deleteFolderWeb(folderID int64, permanent bool) error {
 		return fmt.Errorf("delete folder failed (%d): %s", resp.StatusCode, string(b))
 	}
 	return nil
+}
+
+func (c *Client) deleteFolderWeb(folderID int64, permanent bool) error {
+	return c.deleteFolderModern(folderID, permanent)
 }
 
 func (c *Client) deleteFolderLegacy(folderID int64, permanent bool) error {
@@ -1618,6 +1821,10 @@ func (c *Client) deleteFolderLegacy(folderID int64, permanent bool) error {
 // Si una extensión clasificada como multimedia resultara genérica para SAPI,
 // UpdateMedia recurre a la operación genérica.
 func mediaKindForName(name string) string {
+	switch strings.ToLower(name) {
+	case "audio", "video", "picture", "file":
+		return strings.ToLower(name)
+	}
 	ext := strings.ToLower(name)
 	if i := strings.LastIndex(ext, "."); i >= 0 {
 		ext = ext[i+1:]
@@ -1757,9 +1964,8 @@ func (c *Client) UpdateMedia(mediaID, currentName, newName string, folderID int6
 			if err == nil || !strings.Contains(err.Error(), "MED-1017") || attempt >= mediaMoveRetries {
 				break
 			}
-			// En modo web se pregunta el estado de validación, como la web; si no
-			// se puede saber, se espera a ciegas.
-			if c.WebMode() && c.waitMediaValidated(mediaID) {
+			// Se pregunta el estado de validación; si no se puede saber, se espera a ciegas.
+			if c.waitMediaValidated(mediaID) {
 				logger.Log("[SAPI] ⏳ '%s' estaba en validación (MED-1017); validado, reintento el movimiento (%d/%d).", newName, attempt+1, mediaMoveRetries)
 				continue
 			}
@@ -1849,9 +2055,9 @@ var (
 	}
 )
 
-// webDeleteRequest es el borrado de la web: lleva a la papelera con
+// modernDeleteRequest lleva a la papelera con
 // /media/<tipo>?action=delete&softdelete=true y {"data":{"<tipos>":[id]}}.
-func (c *Client) webDeleteRequest(kind, mediaID string) (*http.Request, error) {
+func (c *Client) modernDeleteRequest(kind, mediaID string) (*http.Request, error) {
 	var id interface{} = mediaID
 	if n, err := strconv.ParseInt(mediaID, 10, 64); err == nil {
 		id = n
@@ -1865,25 +2071,26 @@ func (c *Client) webDeleteRequest(kind, mediaID string) (*http.Request, error) {
 	return req, nil
 }
 
+func (c *Client) webDeleteRequest(kind, mediaID string) (*http.Request, error) {
+	return c.modernDeleteRequest(kind, mediaID)
+}
+
 func (c *Client) DeleteFile(mediaID string, nameOrKind ...string) error {
 	maxRetries := deleteRetries
 	u := fmt.Sprintf("%s/media?action=softdelete&id=%s", c.baseURL, mediaID)
-	// En modo web se borra como la web, con la operación del tipo (deducido del
-	// nombre); si la rechaza, se vuelve a la llamada genérica de siempre.
-	webKind := ""
-	if c.WebMode() {
-		webKind = "file"
-		if len(nameOrKind) > 0 {
-			webKind = mediaKindForName(nameOrKind[0])
-		}
+	// Se intenta primero la operación por tipo (/media/<kind>?action=delete&softdelete=true
+	// con cuerpo JSON); si la rechaza, se vuelve a la llamada genérica de siempre (/media?action=softdelete&id=...).
+	targetKind := "file"
+	if len(nameOrKind) > 0 {
+		targetKind = mediaKindForName(nameOrKind[0])
 	}
 
 	var lastErr error
 	for attempt := 0; attempt <= maxRetries; attempt++ {
 		var req *http.Request
 		var err error
-		if webKind != "" {
-			req, err = c.webDeleteRequest(webKind, mediaID)
+		if targetKind != "" {
+			req, err = c.modernDeleteRequest(targetKind, mediaID)
 		} else {
 			req, err = http.NewRequest("POST", u, strings.NewReader(""))
 			if err == nil {
@@ -1902,9 +2109,9 @@ func (c *Client) DeleteFile(mediaID string, nameOrKind ...string) error {
 
 		if resp.StatusCode == http.StatusNotFound {
 			_ = resp.Body.Close()
-			if webKind != "" {
+			if targetKind != "" {
 				// Un 404 de la operación por tipo no prueba que el archivo ya no esté.
-				webKind = ""
+				targetKind = ""
 				attempt--
 				continue
 			}
@@ -1935,6 +2142,12 @@ func (c *Client) DeleteFile(mediaID string, nameOrKind ...string) error {
 
 		// Si CloudFront devuelve 403 (posible rate limit WAF), reintentar con backoff
 		if resp.StatusCode == http.StatusForbidden {
+			// Si es el bloqueo del WAF (el freno ya está puesto), no se reintenta: cada
+			// reintento cuenta para el WAF y lo alarga (Hyper Backup borra en ráfagas).
+			if !c.WAFBlockedUntil().IsZero() {
+				lastErr = fmt.Errorf("delete file failed: %w", ErrWAFBlocked)
+				break
+			}
 			if attempt < maxRetries {
 				backoff := delete403Backoff(attempt)
 				logger.Log("[SAPI] ⚠️ 403 de CloudFront al borrar '%s'. Esperando %v (%d/%d)...", mediaID, backoff, attempt+1, maxRetries)
@@ -1955,9 +2168,9 @@ func (c *Client) DeleteFile(mediaID string, nameOrKind ...string) error {
 				return nil
 			}
 			lastErr = fmt.Errorf("delete file API error: %s (%s)", res.Error.Message, res.Error.Code)
-			if webKind != "" {
-				logger.Log("[SAPI] ↪ Borrado de '%s' rechazado con media/%s (%s); se usa la llamada genérica.", mediaID, webKind, res.Error.Code)
-				webKind = ""
+			if targetKind != "" {
+				logger.Log("[SAPI] ↪ Borrado de '%s' rechazado con media/%s (%s); se usa la llamada genérica.", mediaID, targetKind, res.Error.Code)
+				targetKind = ""
 				attempt--
 				continue
 			}
@@ -1966,6 +2179,12 @@ func (c *Client) DeleteFile(mediaID string, nameOrKind ...string) error {
 
 		if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 			lastErr = fmt.Errorf("delete file failed (%d): %s", resp.StatusCode, bStr)
+			if targetKind != "" {
+				logger.Log("[SAPI] ↪ Borrado de '%s' rechazado con media/%s (%d); se usa la llamada genérica.", mediaID, targetKind, resp.StatusCode)
+				targetKind = ""
+				attempt--
+				continue
+			}
 			break
 		}
 
@@ -2083,23 +2302,24 @@ func (c *Client) UploadFileToFolder(fileName string, reader io.Reader, size int6
 				time.Sleep(backoff)
 				continue
 			}
-			return nil, fmt.Errorf("upload failed: still in async validation (MED-1017) after %d retries: %s", maxRetries, bStr)
+			return nil, fmt.Errorf("upload failed: still in async validation (MED-1017) after %d retries: %s", maxRetries, summarizeHTTPErrorBody(b))
 		}
 
-		// Manejo de retroceso ante HTTP 429 (Too Many Requests) o 503 (Service Unavailable)
-		if resp.StatusCode == http.StatusTooManyRequests || resp.StatusCode == http.StatusServiceUnavailable {
+		// Manejo de retroceso ante HTTP 429 (Too Many Requests) o errores 5xx de servidor
+		if resp.StatusCode == http.StatusTooManyRequests || resp.StatusCode == http.StatusServiceUnavailable || resp.StatusCode >= 500 {
 			if attempt < maxRetries && canRetry {
+				c.httpClient.CloseIdleConnections()
 				backoff := time.Duration(1<<attempt) * time.Second
 				if backoff > 8*time.Second {
 					backoff = 8 * time.Second
 				}
 				jitter := time.Duration((time.Now().UnixNano()%400)+100) * time.Millisecond
 				sleepDur := backoff + jitter
-				logger.Log("[SAPI] ⏳ Subida pausada por rate limit o servicio ocupado (HTTP %d). Reintentando en %v (%d/%d)...", resp.StatusCode, sleepDur, attempt+1, maxRetries)
+				logger.Log("[SAPI] ⏳ Subida pausada por rate limit o error de servidor (HTTP %d). Reintentando en %v (%d/%d)...", resp.StatusCode, sleepDur, attempt+1, maxRetries)
 				time.Sleep(sleepDur)
 				continue
 			}
-			return nil, fmt.Errorf("upload failed: rate limited or service unavailable (HTTP %d) after %d retries: %s", resp.StatusCode, maxRetries, bStr)
+			return nil, fmt.Errorf("upload failed: rate limited or server error (HTTP %d) after %d retries: %s", resp.StatusCode, maxRetries, summarizeHTTPErrorBody(b))
 		}
 
 		// 408: el host de subida cerró una conexión keep-alive obsoleta
@@ -2116,7 +2336,28 @@ func (c *Client) UploadFileToFolder(fileName string, reader io.Reader, size int6
 				time.Sleep(backoff)
 				continue
 			}
-			return nil, fmt.Errorf("upload failed: request timeout (HTTP 408) after %d retries: %s", maxRetries, bStr)
+			return nil, fmt.Errorf("upload failed: request timeout (HTTP 408) after %d retries: %s", maxRetries, summarizeHTTPErrorBody(b))
+		}
+
+		// 401: doRequestLocked no puede reintentar un cuerpo en flujo (io.Pipe), pero ya renovó
+		// la sesión o capturó credenciales rotadas; rebobinamos y reintentamos si es replayable.
+		if resp.StatusCode == http.StatusUnauthorized {
+			if attempt < maxRetries && canRetry && c.HasCredentials() {
+				if attempt > 0 && !c.IsSessionExpired() {
+					c.refreshSessionWithMode(true)
+				}
+				if !c.IsSessionExpired() {
+					c.httpClient.CloseIdleConnections()
+					backoff := 250 * time.Millisecond
+					if attempt > 0 {
+						backoff = time.Duration(attempt) * time.Second
+					}
+					logger.Log("[SAPI] 🔄 Subida de '%s' recibió HTTP 401; reintentando con sesión renovada (%d/%d)...", fileName, attempt+1, maxRetries)
+					time.Sleep(backoff)
+					continue
+				}
+			}
+			return nil, fmt.Errorf("upload failed (%d): %s", resp.StatusCode, summarizeHTTPErrorBody(b))
 		}
 
 		if resp.StatusCode == http.StatusRequestEntityTooLarge || strings.Contains(bStr, "MED-1020") {
@@ -2124,7 +2365,7 @@ func (c *Client) UploadFileToFolder(fileName string, reader io.Reader, size int6
 		}
 
 		if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusCreated && resp.StatusCode != http.StatusNoContent {
-			return nil, fmt.Errorf("upload failed (%d): %s", resp.StatusCode, bStr)
+			return nil, fmt.Errorf("upload failed (%d): %s", resp.StatusCode, summarizeHTTPErrorBody(b))
 		}
 
 		var res struct {
@@ -2156,6 +2397,16 @@ func (c *Client) UploadFileToFolder(fileName string, reader io.Reader, size int6
 				continue
 			}
 			return nil, fmt.Errorf("upload failed: still in async validation (MED-1017) after %d retries: %s", maxRetries, bStr)
+		}
+
+		if res.Error != nil && (res.Error.Code == "MED-1048" || res.Error.Code == "PAPI-0000") {
+			if attempt < maxRetries && canRetry {
+				c.httpClient.CloseIdleConnections()
+				backoff := 2000*time.Millisecond + time.Duration(attempt)*1500*time.Millisecond
+				logger.Log("[SAPI] ⚠️ Error transitorio de subida (%s: %s) para %s. Reintentando en %v (%d/%d)...", res.Error.Code, res.Error.Message, fileName, backoff, attempt+1, maxRetries)
+				time.Sleep(backoff)
+				continue
+			}
 		}
 
 		finalID := parseFlexibleID(res.ID)
@@ -2202,18 +2453,21 @@ func (c *Client) DownloadFileStream(item MediaItem) (io.ReadCloser, error) {
 }
 
 func (c *Client) DownloadFileStreamRange(item MediaItem, offset int64) (io.ReadCloser, error) {
-	if !c.WebMode() || item.ID == "" {
+	if item.ID == "" || strings.HasPrefix(item.ID, "virtual:") {
 		return c.downloadRange(item, offset)
 	}
-	// Modo web: las URL de descarga van firmadas y caducan. Se usa la última URL
-	// renovada de ese archivo y, si la descarga falla o llega vacía, se pide una URL
-	// nueva (como hace la web al abrir un archivo) y se reintenta una vez.
+	// Las URL de descarga van firmadas y caducan (tanto en modo normal como en modo web).
+	// Se usa la última URL renovada de ese archivo y, si la descarga falla, se pide una
+	// URL nueva por ID y se reintenta una vez (salvo si el WAF ya está en pausa).
 	if u, ok := c.freshURLs.Load(item.ID); ok {
 		item.URL = u.(string)
 	}
 	rc, err := c.downloadRange(item, offset)
 	if err == nil {
 		return rc, nil
+	}
+	if errors.Is(err, ErrWAFBlocked) {
+		return nil, err
 	}
 	fresh, ferr := c.GetMediaByID(item.ID)
 	if ferr != nil || fresh == nil || fresh.URL == "" || fresh.URL == item.URL {
@@ -2260,17 +2514,15 @@ func (c *Client) downloadRange(item MediaItem, offset int64) (io.ReadCloser, err
 		resp.Body.Close()
 		return nil, fmt.Errorf("download returned HTTP %d", resp.StatusCode)
 	}
-	if c.WebMode() {
-		// Un 200 a una petición con rango entregaría el archivo desde el principio
-		// (datos del sitio equivocado), y un cuerpo vacío no sirve para nada.
-		if offset > 0 && resp.StatusCode == http.StatusOK {
-			resp.Body.Close()
-			return nil, fmt.Errorf("download ignoró el rango (HTTP 200 a bytes=%d-)", offset)
-		}
-		if resp.ContentLength == 0 && item.Size > offset {
-			resp.Body.Close()
-			return nil, fmt.Errorf("download devolvió un cuerpo vacío (HTTP %d)", resp.StatusCode)
-		}
+	// Un 200 a una petición con rango entregaría el archivo desde el principio
+	// (datos del sitio equivocado), y un cuerpo vacío no sirve para nada.
+	if offset > 0 && resp.StatusCode == http.StatusOK {
+		resp.Body.Close()
+		return nil, fmt.Errorf("download ignoró el rango (HTTP 200 a bytes=%d-)", offset)
+	}
+	if resp.ContentLength == 0 && item.Size > offset {
+		resp.Body.Close()
+		return nil, fmt.Errorf("download devolvió un cuerpo vacío (HTTP %d)", resp.StatusCode)
 	}
 
 	ct := strings.ToLower(resp.Header.Get("Content-Type"))

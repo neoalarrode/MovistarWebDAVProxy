@@ -37,11 +37,12 @@ func isInternalProxyPath(cleanPath string) bool {
 
 // EmptyFileManager manages debounced cloud persistence and bootstrap of virtual 0-byte files.
 type EmptyFileManager struct {
-	mfs     *MovistarFS
-	mu      sync.Mutex
-	timer   *time.Timer
-	saving  bool
-	pending bool
+	mfs         *MovistarFS
+	mu          sync.Mutex
+	bootstrapMu sync.Mutex
+	timer       *time.Timer
+	saving      bool
+	pending     bool
 }
 
 func NewEmptyFileManager(mfs *MovistarFS) *EmptyFileManager {
@@ -110,6 +111,9 @@ func (efm *EmptyFileManager) SaveManifest() {
 		Files:   make([]VirtualEmptyFileExport, 0, len(files)),
 	}
 	for _, f := range files {
+		if isEphemeralEmptyFile(f.Path) {
+			continue
+		}
 		manifest.Files = append(manifest.Files, VirtualEmptyFileExport{
 			Path:    f.Path,
 			ModTime: f.ModTime,
@@ -178,8 +182,15 @@ func (efm *EmptyFileManager) BootstrapLoad() {
 	if efm == nil || efm.mfs == nil {
 		return
 	}
+	efm.bootstrapMu.Lock()
+	defer efm.bootstrapMu.Unlock()
+
 	ms := efm.mfs.MetadataStore()
 	if ms == nil || efm.mfs.client == nil {
+		return
+	}
+	efm.purgeLocalEphemeralFiles()
+	if efm.mfs.client.IsSessionExpired() {
 		return
 	}
 
@@ -218,8 +229,13 @@ func (efm *EmptyFileManager) BootstrapLoad() {
 	}
 
 	loadedCount := 0
+	skippedEphemeral := false
 	for _, f := range manifest.Files {
 		cleanPath := path.Clean("/" + strings.TrimSpace(f.Path))
+		if isEphemeralEmptyFile(cleanPath) {
+			skippedEphemeral = true
+			continue
+		}
 		dir := path.Dir(cleanPath)
 		baseName := path.Base(cleanPath)
 
@@ -237,4 +253,45 @@ func (efm *EmptyFileManager) BootstrapLoad() {
 		}
 	}
 	logger.Log("[EmptyFiles] 📥 Cargados %d archivos vacíos emulados desde el manifiesto en la nube", loadedCount)
+	if skippedEphemeral {
+		logger.Log("[EmptyFiles] 🧹 Descartados archivos efímeros (locks/estados transitorios) del manifiesto; reescribiendo limpio...")
+		efm.ScheduleSave()
+	}
+}
+
+// isEphemeralEmptyFile identifica archivos vacíos transitorios de bloqueo
+// (locks y sesiones @reader de Hyper Backup) que solo deben existir durante una
+// operación activa y nunca persistirse en el manifiesto ni sobrevivir a reinicios.
+// Los archivos dentro de /Control/@writer (incluidos todos los .cinfo de progreso/rollback)
+// son estado persistente de Hyper Backup y NO deben purgarse.
+func isEphemeralEmptyFile(rawPath string) bool {
+	clean := strings.ToLower(path.Clean("/" + rawPath))
+	return isControlOrLockFile(clean) || strings.Contains(clean, "/control/lock/")
+}
+
+func (efm *EmptyFileManager) purgeLocalEphemeralFiles() {
+	ms := efm.mfs.MetadataStore()
+	if ms == nil {
+		return
+	}
+	files, err := ms.ListAllVirtualEmptyFiles()
+	if err != nil {
+		return
+	}
+	purged := 0
+	for _, f := range files {
+		if !isEphemeralEmptyFile(f.Path) {
+			continue
+		}
+		cleanPath := path.Clean("/" + f.Path)
+		parentFolder, _, isFolder, err := efm.mfs.resolvePathOpts(path.Dir(cleanPath), false)
+		if err == nil && isFolder && parentFolder != nil {
+			if err := ms.DeleteVirtualEmptyFile(parentFolder.ID, path.Base(cleanPath)); err == nil {
+				purged++
+			}
+		}
+	}
+	if purged > 0 {
+		logger.Log("[EmptyFiles] 🧹 Purgados %d archivos vacíos efímeros huérfanos de la caché local al arrancar", purged)
+	}
 }

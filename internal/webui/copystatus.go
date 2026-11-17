@@ -357,15 +357,6 @@ func (s *Server) handleCopyBWLimit(w http.ResponseWriter, r *http.Request) {
 	jsonResponse(w, http.StatusOK, map[string]interface{}{"status": "ok", "bwlimit": rate})
 }
 
-func (s *Server) handleWebSession(w http.ResponseWriter, r *http.Request) {
-	if s.webStatus == nil {
-		jsonResponse(w, http.StatusOK, map[string]interface{}{"enabled": false})
-		return
-	}
-	out := s.webStatus()
-	out["enabled"] = true
-	jsonResponse(w, http.StatusOK, out)
-}
 
 // parseLocalTime interpreta las fechas del script ("2026-11-12 22:43:38" o RFC 3339)
 // y de rclone ("2026/11/12 22:43:38") en hora local. Devuelve cero si no encaja.

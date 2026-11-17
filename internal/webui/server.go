@@ -39,12 +39,12 @@ var loginTmpl = template.Must(template.New("login").Parse(string(loginHTML)))
 
 const (
 	maxBodyBytes       = 1 << 20 // 1 MB
-	loginStateTTL      = 10 * time.Minute
+	loginStateTTL      = 30 * time.Minute
 	maxPendingLogin    = 50
 	sessionCookieName  = "mc_webui_session"
 	defaultSessionTTL  = 24 * time.Hour
 	rememberSessionTTL = 30 * 24 * time.Hour
-	panelCSP           = "default-src 'self'; script-src 'self' 'unsafe-inline' https://cdn.tailwindcss.com; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; font-src 'self' https://fonts.gstatic.com; img-src 'self' data:; connect-src 'self'; frame-ancestors 'none'"
+	panelCSP           = "default-src 'self'; base-uri 'self'; form-action 'self'; script-src 'self' 'unsafe-inline' https://cdn.tailwindcss.com; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; font-src 'self' https://fonts.gstatic.com; img-src 'self' data:; connect-src 'self'; frame-ancestors 'none'"
 )
 
 type webSession struct {
@@ -166,6 +166,7 @@ func (s *Server) Routes() http.Handler {
 		mux.Handle("/web-login/", s.webLogin)
 	}
 	mux.HandleFunc("/web_session", s.handleWebSession)
+	mux.HandleFunc("/transfers", s.handleTransfers)
 	mux.HandleFunc("/copy_status", s.handleCopyStatus)
 	mux.HandleFunc("/copy_events", s.handleCopyEvents)
 	mux.HandleFunc("/copy_bwlimit", s.handleCopyBWLimit)
@@ -179,6 +180,11 @@ func (s *Server) securityMiddleware(next http.Handler) http.Handler {
 		w.Header().Set("X-Frame-Options", "DENY")
 		w.Header().Set("Referrer-Policy", "same-origin")
 		w.Header().Set("Content-Security-Policy", panelCSP)
+		// Mejoras
+		w.Header().Set("Cross-Origin-Opener-Policy", "same-origin")
+		w.Header().Set("Cross-Origin-Resource-Policy", "same-origin")
+		w.Header().Set("Permissions-Policy", "camera=(), microphone=(), geolocation=()")
+
 
 		// /health siempre accesible sin autenticación para healthchecks de Docker
 		if r.URL.Path == "/health" || r.URL.Path == "/favicon.ico" {
@@ -186,6 +192,14 @@ func (s *Server) securityMiddleware(next http.Handler) http.Handler {
 			return
 		}
 
+		// Protección CSRF / Cross-Origin para métodos que modifican estado
+		if r.Method == http.MethodPost || r.Method == http.MethodPut || r.Method == http.MethodDelete || r.Method == http.MethodPatch {
+			if site := r.Header.Get("Sec-Fetch-Site"); site == "cross-site" {
+				http.Error(w, "Forbidden (cross-site request)", http.StatusForbidden)
+				return
+			}
+		}
+		
 		// Rutas públicas de autenticación web
 		if r.URL.Path == "/login" || r.URL.Path == "/logout" {
 			next.ServeHTTP(w, r)
@@ -197,16 +211,34 @@ func (s *Server) securityMiddleware(next http.Handler) http.Handler {
 			return
 		}
 
-		if s.isAuthenticated(r) {
+		// 1. Sesión web activa por cookie (navegación del panel WebUI)
+		token := s.getSessionToken(r)
+		if token != "" && s.validateSession(token) {
 			next.ServeHTTP(w, r)
 			return
 		}
 
-		// No autenticado
-		clientIP := config.ExtractClientIP(r)
+		// 2. Navegación web del navegador (requiere sesión interactiva mediante formulario en /login)
+		accept := strings.ToLower(r.Header.Get("Accept"))
+		isHTMLNav := strings.Contains(accept, "text/html")
 
-		// 1. Si el cliente envió cabecera de Basic Auth (e.g. curl o scripts automáticos con credenciales erróneas)
-		rawUser, _, _, hasAuth := config.ParseBasicAuthHeader(r.Header.Get("Authorization"))
+		// 3. Clientes no interactivos / API con cabecera Basic Auth
+		rawUser, cleanUser, pass, hasAuth := config.ParseBasicAuthHeader(r.Header.Get("Authorization"))
+		if hasAuth && s.authCfg.Validate(cleanUser, pass) {
+			if !isHTMLNav {
+				next.ServeHTTP(w, r)
+				return
+			}
+		}
+
+		// 4. Si es navegación web en el navegador sin sesión activa -> redirigir a /login
+		if isHTMLNav {
+			http.Redirect(w, r, "/login", http.StatusSeeOther)
+			return
+		}
+
+		// 5. No autenticado para peticiones API / scripts
+		clientIP := config.ExtractClientIP(r)
 		if hasAuth {
 			s.rateLimiter.RecordFailure(clientIP)
 			logger.Log("[WebUI] 🔒 Intento de acceso Basic Auth fallido al panel desde %s (usuario: %s)", clientIP, logger.Mask(rawUser))
@@ -215,14 +247,7 @@ func (s *Server) securityMiddleware(next http.Handler) http.Handler {
 			return
 		}
 
-		// 2. Si es una petición de navegación web (GET a "/" o con Accept: text/html)
-		accept := strings.ToLower(r.Header.Get("Accept"))
-		if r.Method == http.MethodGet && (r.URL.Path == "/" || strings.Contains(accept, "text/html")) {
-			http.Redirect(w, r, "/login", http.StatusSeeOther)
-			return
-		}
-
-		// 3. Para peticiones AJAX / API sin cabecera de autenticación, devolver 401 Unauthorized sin WWW-Authenticate para evitar el popup del navegador
+		// 6. Para peticiones AJAX / API sin cabecera de autenticación, devolver 401 Unauthorized sin popup
 		jsonResponse(w, http.StatusUnauthorized, map[string]interface{}{
 			"status":  "error",
 			"message": "Autenticación requerida. Inicia sesión en /login",
@@ -506,7 +531,8 @@ func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 
 	switch r.Method {
 	case http.MethodGet, http.MethodHead:
-		if s.isAuthenticated(r) {
+		token := s.getSessionToken(r)
+		if token != "" && s.validateSession(token) {
 			http.Redirect(w, r, "/", http.StatusSeeOther)
 			return
 		}
@@ -632,9 +658,9 @@ func (s *Server) handleLogout(w http.ResponseWriter, r *http.Request) {
 	token := s.getSessionToken(r)
 	if token != "" {
 		s.destroySession(token)
-		s.clearSessionCookie(w, r)
 		logger.Log("[WebUI] 🔒 Sesión cerrada correctamente")
 	}
+	s.clearSessionCookie(w, r)
 	if isJSONRequest(r) {
 		jsonResponse(w, http.StatusOK, map[string]interface{}{
 			"status":   "ok",
@@ -931,6 +957,16 @@ func (s *Server) handleCompleteLogin(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	var inputValidationKey string
+	if parsedInputURL, err := url.Parse(rawCode); err == nil {
+		q := parsedInputURL.Query()
+		if vk := q.Get("validationkey"); vk != "" {
+			inputValidationKey = vk
+		} else if vk := q.Get("validationKey"); vk != "" {
+			inputValidationKey = vk
+		}
+	}
+
 	callbackURL := strings.TrimSpace(rawCode)
 	if !strings.HasPrefix(strings.ToLower(callbackURL), "http") {
 		callback, parseErr := url.Parse(auth.GetOAuthRedirectURI(provider))
@@ -945,7 +981,7 @@ func (s *Server) handleCompleteLogin(w http.ResponseWriter, r *http.Request) {
 		callbackURL = callback.String()
 	}
 
-	_, primedCookies, sessionErr := auth.NewSAPILoginSessionAt(provider, callbackURL)
+	primedClient, primedCookies, sessionErr := auth.NewSAPILoginSessionAt(provider, callbackURL)
 	if sessionErr != nil {
 		logger.Log("[OAuth] ⚠️ No se pudo preparar la sesión web previa a SAPI: %v", sessionErr)
 	} else {
@@ -961,12 +997,13 @@ func (s *Server) handleCompleteLogin(w http.ResponseWriter, r *http.Request) {
 	}
 
 	existingCfg := config.LoadAccountConfig(phone)
-	devID := existingCfg.DeviceID
+	devID := auth.SanitizeDeviceID(existingCfg.DeviceID)
 	if devID == "" {
 		devID = auth.GenerateDeviceID()
 	}
-	logger.Log("[OAuth] ✔ Tokens obtenidos. Usando autorización OAuth directa para el dispositivo %s (%s)...", logger.Mask(devID), provider)
+	logger.Log("[OAuth] ✔ Tokens obtenidos para el dispositivo %s (%s)...", logger.Mask(devID), provider)
 
+	sapiBase := auth.GetSAPIBaseURL(provider)
 	nowMS := time.Now().UnixMilli()
 
 	cfg := config.AccountConfig{
@@ -982,11 +1019,44 @@ func (s *Server) handleCompleteLogin(w http.ResponseWriter, r *http.Request) {
 		TelegramChatID:   existingCfg.TelegramChatID,
 	}
 
-	if primedCookies.JSessionID != "" {
+	var sapiRes auth.SAPILoginResult
+	for attempt := 0; attempt < 3; attempt++ {
+		sapiRes = auth.SAPILoginOAuth(primedClient, sapiBase, tokens.AccessToken, tokens.RefreshToken, devID, "PC Windows", nowMS, strconv.Itoa(tokens.ExpiresIn))
+		if sapiRes.StatusCode == http.StatusOK && sapiRes.Error == nil && (sapiRes.ValidationKey != "" || sapiRes.JSessionID != "") {
+			break
+		}
+		if attempt < 2 {
+			time.Sleep(time.Duration(attempt+1) * time.Second)
+		}
+	}
+
+	if sapiRes.ValidationKey != "" {
+		cfg.ValidationKey = sapiRes.ValidationKey
+	} else if primedCookies.ValidationKey != "" {
+		cfg.ValidationKey = primedCookies.ValidationKey
+	} else if inputValidationKey != "" {
+		cfg.ValidationKey = inputValidationKey
+	}
+	if sapiRes.JSessionID != "" {
+		cfg.JSessionID = sapiRes.JSessionID
+	} else if primedCookies.JSessionID != "" {
 		cfg.JSessionID = primedCookies.JSessionID
 	}
-	if primedCookies.ValidationKey != "" {
-		cfg.ValidationKey = primedCookies.ValidationKey
+	if sapiRes.LastRefreshDate > 0 {
+		cfg.LastRefreshDate = sapiRes.LastRefreshDate
+	}
+	if sapiRes.RefreshedOAuth != nil {
+		if sapiRes.RefreshedOAuth.AccessToken != "" {
+			cfg.AccessToken = sapiRes.RefreshedOAuth.AccessToken
+		}
+		if sapiRes.RefreshedOAuth.RefreshToken != "" {
+			cfg.RefreshToken = sapiRes.RefreshedOAuth.RefreshToken
+		}
+	}
+	if sapiRes.StatusCode == http.StatusOK && sapiRes.Error == nil {
+		logger.Log("[OAuth] ✔ Sesión SAPI inicializada con éxito (%s).", provider)
+	} else {
+		logger.Log("[OAuth] ⚠️ SAPI devolvió HTTP %d tras canje en %s (%v). Continuando con tokens OAuth.", sapiRes.StatusCode, provider, sapiRes.Error)
 	}
 
 	if err := config.SaveAccountConfig(cfg); err != nil {
@@ -1016,6 +1086,10 @@ func (s *Server) handleCompleteLogin(w http.ResponseWriter, r *http.Request) {
 					logger.Log("[Metadata] ⚠️ Error en sincronización inicial: %v", syncErr)
 				} else {
 					logger.Log("[Metadata] ✔ Sincronización inicial completada para %s", logger.Mask(phone))
+					if fs := s.webdavServer.FS(); fs != nil {
+						fs.RecordSyncTime(time.Now())
+						fs.BootstrapEmptyFiles()
+					}
 				}
 			}()
 		}
@@ -1051,6 +1125,18 @@ func (s *Server) handleTestTelegram(w http.ResponseWriter, r *http.Request) {
 		chatID = cfg.TelegramChatID
 	}
 
+	// Si no había archivo en disco (ej. tras desvincular), usar los activos en el notificador / Docker
+	if botToken == "" || chatID == "" {
+		envToken, envChat := s.notifier.Credentials()
+		if botToken == "" {
+			botToken = envToken
+		}
+		if chatID == "" {
+			chatID = envChat
+		}
+	}
+	
+	
 	if botToken == "" || chatID == "" {
 		jsonResponse(w, http.StatusBadRequest, map[string]interface{}{
 			"status":  "error",
