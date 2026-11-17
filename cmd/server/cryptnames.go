@@ -37,6 +37,10 @@ func prepareVault() bool {
 // setupCrypt arranca, si hay clave, el rclone interno que sirve en el puerto WebDAV
 // público los archivos descifrados (sobre el WebDAV en bruto de rawPort) y el
 // descifrado de nombres del panel.
+// internalDecryptedAddr es donde escucha el rclone interno; delante va el WebDAV
+// público del proxy (decryptedGateway).
+const internalDecryptedAddr = "127.0.0.1:8091"
+
 func setupCrypt(webdavPort, rawPort string) *rclonesvc.Service {
 	webdav.SetDisplayName(func(p string) string {
 		c := vault.Current()
@@ -44,7 +48,13 @@ func setupCrypt(webdavPort, rawPort string) *rclonesvc.Service {
 		if c == nil || n == nil {
 			return ""
 		}
-		return n.DecryptPath(p, c.Root)
+		// Solo se descifra lo que está dentro de una carpeta marcada como cifrada.
+		for _, project := range c.Projects() {
+			if d := n.DecryptPath(p, project); d != "" {
+				return project + "/" + d
+			}
+		}
+		return ""
 	})
 
 	pass := os.Getenv("WEBDAV_PASSWORD")
@@ -56,7 +66,7 @@ func setupCrypt(webdavPort, rawPort string) *rclonesvc.Service {
 		UpstreamURL: "http://127.0.0.1:" + rawPort,
 		User:        os.Getenv("WEBDAV_USER"),
 		Pass:        pass,
-		Addr:        ":" + webdavPort,
+		Addr:        internalDecryptedAddr,
 		CacheMode:   os.Getenv("WEBDAV_DECRYPTED_CACHE_MODE"),
 		MountPath:   strings.TrimSpace(os.Getenv("WEBDAV_MOUNT_PATH")),
 		MountArgs:   strings.Fields(os.Getenv("WEBDAV_MOUNT_ARGS")),

@@ -21,7 +21,7 @@ import (
 type Crypt struct {
 	Password    string `json:"password"`  // en claro en memoria; cifrada en disco
 	Password2   string `json:"password2"` // sal (puede ir vacía)
-	Root        string `json:"root"`      // carpeta de la nube donde empieza (p. ej. "emby")
+	Root        string `json:"root"`      // carpeta(s) cifrada(s) de la raíz de la nube, separadas por comas (p. ej. "emby")
 	ChunkSize   string `json:"chunk_size"`
 	NameFormat  string `json:"name_format"`
 	Transaction string `json:"transactions"`
@@ -165,4 +165,15 @@ func Names() *cryptname.Cipher {
 		return nil
 	}
 	return n
+}
+
+// Projects son las carpetas de la raíz de la nube que van cifradas con esta clave.
+func (c Crypt) Projects() []string {
+	var out []string
+	for _, p := range strings.Split(c.Root, ",") {
+		if p = strings.Trim(strings.TrimSpace(p), "/"); p != "" {
+			out = append(out, p)
+		}
+	}
+	return out
 }

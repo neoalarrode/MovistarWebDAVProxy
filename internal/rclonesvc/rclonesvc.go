@@ -9,6 +9,7 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"net"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -117,8 +118,11 @@ func (s *Service) Stop() {
 	}
 }
 
-// writeConfig escribe un rclone.conf (0600) con los tres remotos.
-func (s *Service) writeConfig(c vault.Crypt) (string, error) {
+// writeConfig escribe un rclone.conf (0600). «nube» es el WebDAV en bruto del
+// proxy; cada carpeta cifrada de la raíz tiene su chunker + crypt; «raiz» las junta
+// (combine) con el resto de carpetas de la raíz tal cual, para servir la nube entera
+// desde la raíz con lo cifrado ya descifrado.
+func (s *Service) writeConfig(c vault.Crypt, topDirs []string) (string, error) {
 	if err := os.MkdirAll(s.opts.ConfigDir, 0o700); err != nil {
 		return "", err
 	}
@@ -131,12 +135,27 @@ func (s *Service) writeConfig(c vault.Crypt) (string, error) {
 	}
 	var b strings.Builder
 	fmt.Fprintf(&b, "[nube]\ntype = webdav\nurl = %s\nvendor = owncloud\nuser = %s\npass = %s\n\n", s.opts.UpstreamURL, s.opts.User, ob(s.opts.Pass))
-	fmt.Fprintf(&b, "[nube-trozos]\ntype = chunker\nremote = nube:%s\nchunk_size = %s\nname_format = %s\ntransactions = %s\nhash_type = none\nmeta_format = simplejson\n\n",
-		c.Root, c.ChunkSize, c.NameFormat, c.Transaction)
-	fmt.Fprintf(&b, "[nube-cifrada]\ntype = crypt\nremote = nube-trozos:\nfilename_encryption = standard\ndirectory_name_encryption = true\npassword = %s\n", ob(c.Password))
-	if c.Password2 != "" {
-		fmt.Fprintf(&b, "password2 = %s\n", ob(c.Password2))
+	// Conviven carpetas cifradas y en claro: las de c.Projects() (las marcadas como
+	// cifradas) se ven descifradas con la clave; el resto de la raíz, tal cual.
+	encrypted := map[string]bool{}
+	var upstreams []string
+	for i, p := range c.Projects() {
+		encrypted[p] = true
+		fmt.Fprintf(&b, "[trozos-%d]\ntype = chunker\nremote = nube:%s\nchunk_size = %s\nname_format = %s\ntransactions = %s\nhash_type = none\nmeta_format = simplejson\n\n",
+			i, p, c.ChunkSize, c.NameFormat, c.Transaction)
+		fmt.Fprintf(&b, "[cifrada-%d]\ntype = crypt\nremote = trozos-%d:\nfilename_encryption = standard\ndirectory_name_encryption = true\npassword = %s\n", i, i, ob(c.Password))
+		if c.Password2 != "" {
+			fmt.Fprintf(&b, "password2 = %s\n", ob(c.Password2))
+		}
+		b.WriteString("\n")
+		upstreams = append(upstreams, fmt.Sprintf("%q", fmt.Sprintf("%s=cifrada-%d:", p, i)))
 	}
+	for _, d := range topDirs {
+		if d = strings.Trim(d, "/"); d != "" && !encrypted[d] {
+			upstreams = append(upstreams, fmt.Sprintf("%q", fmt.Sprintf("%s=nube:%s", d, d)))
+		}
+	}
+	fmt.Fprintf(&b, "[raiz]\ntype = combine\nupstreams = %s\n", strings.Join(upstreams, " "))
 	path := filepath.Join(s.opts.ConfigDir, "rclone.conf")
 	if err := os.WriteFile(path, []byte(b.String()), 0o600); err != nil {
 		return "", err
@@ -144,9 +163,31 @@ func (s *Service) writeConfig(c vault.Crypt) (string, error) {
 	return path, nil
 }
 
+// topDirs lista las carpetas de la raíz de la nube (WebDAV en bruto del proxy).
+func (s *Service) topDirs(ctx context.Context, c vault.Crypt) []string {
+	conf, err := s.writeConfig(c, nil)
+	if err != nil {
+		return nil
+	}
+	cctx, cancel := context.WithTimeout(ctx, 2*time.Minute)
+	defer cancel()
+	out, err := exec.CommandContext(cctx, s.opts.Binary, "lsf", "--dirs-only", "--config", conf, "nube:").Output()
+	if err != nil {
+		logger.Log("[Descifrado] ⚠️ No se pudieron listar las carpetas de la raíz: %v", err)
+		return nil
+	}
+	var dirs []string
+	for _, l := range strings.Split(string(out), "\n") {
+		if l = strings.Trim(strings.TrimSpace(l), "/"); l != "" {
+			dirs = append(dirs, l)
+		}
+	}
+	return dirs
+}
+
 // args son los argumentos de «rclone serve webdav».
 func (s *Service) args(conf string) []string {
-	a := []string{"serve", "webdav", "nube-cifrada:", "--config", conf,
+	a := []string{"serve", "webdav", "raiz:", "--config", conf,
 		"--addr", s.opts.Addr, "--vfs-cache-mode", s.opts.CacheMode,
 		"--dir-cache-time", "1m", "--log-level", "NOTICE"}
 	if s.opts.User != "" {
@@ -158,7 +199,7 @@ func (s *Service) args(conf string) []string {
 func (s *Service) supervise(ctx context.Context, c vault.Crypt) {
 	backoff := 2 * time.Second
 	for ctx.Err() == nil {
-		conf, err := s.writeConfig(c)
+		conf, err := s.writeConfig(c, s.topDirs(ctx, c))
 		if err != nil {
 			s.setState(false, err.Error())
 			return
@@ -173,7 +214,7 @@ func (s *Service) supervise(ctx context.Context, c vault.Crypt) {
 			return
 		}
 		s.setState(true, "")
-		logger.Log("[Descifrado] 🔓 WebDAV descifrado en %s (rclone crypt + chunker sobre el proxy, caché %s)", s.opts.Addr, s.opts.CacheMode)
+		logger.Log("[Descifrado] 🔓 WebDAV en %s: la nube desde la raíz; cifradas %v, el resto en claro (caché %s)", s.opts.Addr, c.Projects(), s.opts.CacheMode)
 		go pipeLog(out)
 		start := time.Now()
 		err = cmd.Wait()
@@ -214,7 +255,7 @@ func pipeLog(r io.Reader) {
 
 // mountArgs son los argumentos de «rclone mount».
 func (s *Service) mountArgs(conf string) []string {
-	a := []string{"mount", "nube-cifrada:", s.opts.MountPath, "--config", conf}
+	a := []string{"mount", "raiz:", s.opts.MountPath, "--config", conf}
 	if len(s.opts.MountArgs) > 0 {
 		return append(a, s.opts.MountArgs...)
 	}
@@ -225,7 +266,7 @@ func (s *Service) mountArgs(conf string) []string {
 func (s *Service) superviseMount(ctx context.Context, c vault.Crypt) {
 	backoff := 5 * time.Second
 	for ctx.Err() == nil {
-		conf, err := s.writeConfig(c)
+		conf, err := s.writeConfig(c, s.topDirs(ctx, c))
 		if err != nil {
 			s.setMount(false, err.Error())
 			return
@@ -272,4 +313,28 @@ func (s *Service) setMount(running bool, errMsg string) {
 	s.mu.Lock()
 	s.mountRunning, s.mountErr = running, errMsg
 	s.mu.Unlock()
+}
+
+// CheckAuth comprueba las credenciales del WebDAV (las mismas del proxy).
+func (s *Service) CheckAuth(user, pass string) bool {
+	if s.opts.User == "" {
+		return true
+	}
+	return user == s.opts.User && pass == s.opts.Pass
+}
+
+// WaitReady espera (hasta 60 s) a que el WebDAV interno acepte conexiones.
+func (s *Service) WaitReady(ctx context.Context) {
+	addr := s.opts.Addr
+	if strings.HasPrefix(addr, ":") {
+		addr = "127.0.0.1" + addr
+	}
+	deadline := time.Now().Add(60 * time.Second)
+	for time.Now().Before(deadline) && ctx.Err() == nil {
+		if c, err := net.DialTimeout("tcp", addr, time.Second); err == nil {
+			_ = c.Close()
+			return
+		}
+		time.Sleep(300 * time.Millisecond)
+	}
 }

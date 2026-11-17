@@ -11,13 +11,14 @@ import (
 
 func TestWriteConfig_ThreeRemotesAndObscuredSecrets(t *testing.T) {
 	s := New(Options{UpstreamURL: "http://127.0.0.1:8080", User: "u", Pass: "p", ConfigDir: t.TempDir()})
-	path, err := s.writeConfig(vault.Crypt{Password: "clave", Password2: "sal", Root: "emby", ChunkSize: "1Gi", NameFormat: "*-chunk###", Transaction: "norename"})
+	path, err := s.writeConfig(vault.Crypt{Password: "clave", Password2: "sal", Root: "emby", ChunkSize: "1Gi", NameFormat: "*-chunk###", Transaction: "norename"}, []string{"emby", "Fotos del móvil"})
 	if err != nil {
 		t.Fatal(err)
 	}
 	b, _ := os.ReadFile(path)
 	conf := string(b)
-	for _, want := range []string{"[nube]", "url = http://127.0.0.1:8080", "[nube-trozos]", "remote = nube:emby", "name_format = *-chunk###", "transactions = norename", "[nube-cifrada]", "remote = nube-trozos:", "directory_name_encryption = true"} {
+	for _, want := range []string{"[nube]", "url = http://127.0.0.1:8080", "[trozos-0]", "remote = nube:emby", "name_format = *-chunk###", "transactions = norename", "[cifrada-0]", "remote = trozos-0:", "directory_name_encryption = true",
+		"[raiz]", "type = combine", `upstreams = "emby=cifrada-0:" "Fotos del móvil=nube:Fotos del móvil"`} {
 		if !strings.Contains(conf, want) {
 			t.Errorf("falta %q en:\n%s", want, conf)
 		}
@@ -41,12 +42,12 @@ func TestWriteConfig_ThreeRemotesAndObscuredSecrets(t *testing.T) {
 func TestMountArgs_DefaultsMatchProduction(t *testing.T) {
 	s := New(Options{MountPath: "/mnt/emby_cloud"})
 	got := strings.Join(s.mountArgs("/tmp/r.conf"), " ")
-	want := "mount nube-cifrada: /mnt/emby_cloud --config /tmp/r.conf --allow-other --vfs-cache-mode writes --vfs-cache-max-size 30G --vfs-cache-max-age 1h --cache-dir /app/cache/rclone --vfs-read-chunk-size 32M --vfs-read-chunk-size-limit 256M --dir-cache-time 1000h --attr-timeout 1h --umask 022 --rc --rc-addr 127.0.0.1:5573 --rc-no-auth"
+	want := "mount raiz: /mnt/emby_cloud --config /tmp/r.conf --allow-other --vfs-cache-mode writes --vfs-cache-max-size 30G --vfs-cache-max-age 1h --cache-dir /app/cache/rclone --vfs-read-chunk-size 32M --vfs-read-chunk-size-limit 256M --dir-cache-time 1000h --attr-timeout 1h --umask 022 --rc --rc-addr 127.0.0.1:5573 --rc-no-auth"
 	if got != want {
 		t.Errorf("args:\n%s\nesperado:\n%s", got, want)
 	}
 	s2 := New(Options{MountPath: "/x", MountArgs: []string{"--vfs-cache-mode", "off"}})
-	if g := strings.Join(s2.mountArgs("c"), " "); g != "mount nube-cifrada: /x --config c --vfs-cache-mode off" {
+	if g := strings.Join(s2.mountArgs("c"), " "); g != "mount raiz: /x --config c --vfs-cache-mode off" {
 		t.Errorf("WEBDAV_MOUNT_ARGS no sustituye: %s", g)
 	}
 }

@@ -229,7 +229,8 @@ func main() {
 		rawPort = "8090"
 	}
 	davAddr := ":" + webdavPort
-	if prepareVault() {
+	encryptedMode := prepareVault()
+	if encryptedMode {
 		davAddr = "127.0.0.1:" + rawPort
 	}
 	davHTTP := &http.Server{
@@ -253,6 +254,21 @@ func main() {
 	uiServer := webui.NewServerWithAuth(client, webdavServer, uiAuth)
 	cryptSvc := setupCrypt(webdavPort, rawPort)
 	defer cryptSvc.Stop()
+	if encryptedMode {
+		pubHTTP := &http.Server{
+			Addr:              ":" + webdavPort,
+			Handler:           newDecryptedGateway(internalDecryptedAddr, webdavServer, cryptSvc),
+			ReadHeaderTimeout: 10 * time.Second,
+			IdleTimeout:       120 * time.Second,
+		}
+		go func() {
+			logger.Log("[WebDAV] 🔓 WebDAV público en :%s con los archivos descifrados (en bruto solo en %s)", webdavPort, davAddr)
+			if err := pubHTTP.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+				logger.Log("[FATAL] Error en el WebDAV descifrado: %v", err)
+			}
+		}()
+		defer pubHTTP.Close()
+	}
 	uiServer.SetCrypt(cryptSvc)
 	if webSess != nil {
 		view := webSess.LoginView()
