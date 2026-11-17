@@ -73,12 +73,12 @@ func main() {
 	} else {
 		logger.Log("[!] ⚠️ No se encontraron credenciales. Abre el panel web para vincular.")
 		_ = notifier.Alert(
-			"",	// se mandará siempre, sino poner faltan_credenciales para recibir 1 a la hora
+			"", // se mandará siempre, sino poner faltan_credenciales para recibir 1 a la hora
 			"", "Sin credenciales configuradas, cuenta no vinculada",
 			"El Proxy WebDAV ha arrancado pero no hay ninguna cuenta vinculada. Accede al panel web para vincular tu cuenta de Movistar/O2 Cloud y activar el acceso.",
 			"Arranque sin sesión activa, en espera de vinculación",
 		)
-		
+
 		// PDTE No debería iniciarse servicios para evitar bloqueos, aborar arranque os.Exit(1) ????  o bien luego aplicar SetRunning(false) para pararlo??
 	}
 
@@ -101,7 +101,6 @@ func main() {
 			logger.Log("[Auth] 🔧 DESKTOP_USER_AGENT usando valor por defecto: %s", desktopUA)
 		}
 	}
-
 
 	// log Huella TLS (uTLS)
 	client, err := sapi.NewClient(cfg)
@@ -222,8 +221,19 @@ func main() {
 	if p := strings.TrimSpace(os.Getenv("WEBDAV_PORT")); p != "" {
 		webdavPort = p
 	}
+	// Con clave de cifrado configurada, el puerto WebDAV público sirve los archivos ya
+	// descifrados (rclone interno) y el WebDAV en bruto (trozos cifrados) queda solo
+	// para uso interno, en 127.0.0.1:WEBDAV_RAW_PORT.
+	rawPort := strings.TrimSpace(os.Getenv("WEBDAV_RAW_PORT"))
+	if rawPort == "" {
+		rawPort = "8090"
+	}
+	davAddr := ":" + webdavPort
+	if prepareVault() {
+		davAddr = "127.0.0.1:" + rawPort
+	}
 	davHTTP := &http.Server{
-		Addr:              ":" + webdavPort,
+		Addr:              davAddr,
 		Handler:           webdavServer,
 		ReadHeaderTimeout: 10 * time.Second,
 		IdleTimeout:       120 * time.Second,
@@ -232,17 +242,16 @@ func main() {
 	}
 
 	go func() {
-		logger.Log("[WebDAV] ✔ Servidor WebDAV escuchando en :%s", webdavPort)
+		logger.Log("[WebDAV] ✔ Servidor WebDAV escuchando en %s", davAddr)
 		if err := davHTTP.ListenAndServe(); err != nil && err != http.ErrServerClosed {
 			logger.Log("[FATAL] Error en servidor WebDAV: %v", err)
 		}
 	}()
 
-	
 	// 3. Servidor Web UI
 	// avisará por telegram si OnSessionExpired, al cargas notificaciones
 	uiServer := webui.NewServerWithAuth(client, webdavServer, uiAuth)
-	cryptSvc := setupCrypt(webdavPort)
+	cryptSvc := setupCrypt(webdavPort, rawPort)
 	defer cryptSvc.Stop()
 	uiServer.SetCrypt(cryptSvc)
 	if webSess != nil {

@@ -10,13 +10,10 @@ import (
 	"movistar-webdav-proxy/internal/webdav"
 )
 
-// setupCrypt carga la clave de cifrado guardada en el proxy (internal/vault) y, si
-// hay, arranca el WebDAV descifrado interno y el descifrado de nombres del panel.
-//
-// Para pasar una clave existente sin usar el panel, al primer arranque se puede dar
-// RCLONE_CRYPT_PASSWORD / RCLONE_CRYPT_PASSWORD2 (como en rclone.conf, ofuscadas o
-// en claro) y RCLONE_CRYPT_ROOT: se guardan en el proxy y ya no hacen falta.
-func setupCrypt(webdavPort string) *rclonesvc.Service {
+// prepareVault carga la clave de cifrado guardada en el proxy (internal/vault) o
+// la importa una vez de RCLONE_CRYPT_PASSWORD[2]/RCLONE_CRYPT_ROOT (como en
+// rclone.conf, ofuscadas o en claro). Devuelve si hay clave.
+func prepareVault() bool {
 	if _, err := vault.Load(); err != nil {
 		logger.Log("[Descifrado] ⚠️ %v", err)
 	}
@@ -34,6 +31,13 @@ func setupCrypt(webdavPort string) *rclonesvc.Service {
 			}
 		}
 	}
+	return vault.Current() != nil
+}
+
+// setupCrypt arranca, si hay clave, el rclone interno que sirve en el puerto WebDAV
+// público los archivos descifrados (sobre el WebDAV en bruto de rawPort) y el
+// descifrado de nombres del panel.
+func setupCrypt(webdavPort, rawPort string) *rclonesvc.Service {
 	webdav.SetDisplayName(func(p string) string {
 		c := vault.Current()
 		n := vault.Names()
@@ -49,10 +53,10 @@ func setupCrypt(webdavPort string) *rclonesvc.Service {
 	}
 	svc := rclonesvc.New(rclonesvc.Options{
 		Binary:      os.Getenv("RCLONE_BINARY"),
-		UpstreamURL: "http://127.0.0.1:" + webdavPort,
+		UpstreamURL: "http://127.0.0.1:" + rawPort,
 		User:        os.Getenv("WEBDAV_USER"),
 		Pass:        pass,
-		Addr:        os.Getenv("WEBDAV_DECRYPTED_ADDR"),
+		Addr:        ":" + webdavPort,
 		CacheMode:   os.Getenv("WEBDAV_DECRYPTED_CACHE_MODE"),
 		MountPath:   strings.TrimSpace(os.Getenv("WEBDAV_MOUNT_PATH")),
 		MountArgs:   strings.Fields(os.Getenv("WEBDAV_MOUNT_ARGS")),
