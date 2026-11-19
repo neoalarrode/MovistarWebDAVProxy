@@ -270,6 +270,7 @@ func main() {
 	defer pubHTTP.Close()
 	uiServer.SetCrypt(cryptSvc)
 	webui.SetCloudFolders(cloudFolderLister(webdavServer))
+	cryptSvc.SetRootLister(rootDirLister(webdavServer))
 	if webSess != nil {
 		view := webSess.LoginView()
 		uiServer.SetWebLogin(view.Handler("/web-login/"))

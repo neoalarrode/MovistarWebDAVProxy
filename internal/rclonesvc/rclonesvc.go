@@ -45,6 +45,14 @@ type Options struct {
 	OnRestart func() // al cambiar las configuraciones (p. ej. recargar los descifradores de nombres)
 }
 
+// SetRootLister fija cómo listar las carpetas de la raíz sin lanzar rclone (el
+// propio listado del proxy). Si devuelve nil, se usa rclone lsf.
+func (s *Service) SetRootLister(f func() []string) {
+	s.mu.Lock()
+	s.rootLister = f
+	s.mu.Unlock()
+}
+
 // DefaultMountArgs son las opciones del montaje probado en producción.
 func DefaultMountArgs(cacheDir string) []string {
 	return []string{"--allow-other", "--vfs-cache-mode", "writes", "--vfs-cache-max-size", "30G", "--vfs-cache-max-age", "1h",
@@ -86,6 +94,8 @@ type Service struct {
 
 	mountRunning bool
 	mountErr     string
+
+	rootLister func() []string
 }
 
 // New crea el servicio con valores por defecto.
@@ -194,6 +204,14 @@ func (s *Service) writeConfig(folders []vault.Folder, topDirs []string) (string,
 
 // topDirs lista las carpetas de la raíz de la nube (WebDAV en bruto del proxy).
 func (s *Service) topDirs(ctx context.Context, folders []vault.Folder) []string {
+	s.mu.Lock()
+	lister := s.rootLister
+	s.mu.Unlock()
+	if lister != nil {
+		if dirs := lister(); dirs != nil {
+			return dirs
+		}
+	}
 	conf, err := s.writeConfig(folders, nil)
 	if err != nil {
 		return nil

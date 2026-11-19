@@ -196,3 +196,30 @@ func cloudFolderLister(srv *webdav.Server) func() []string {
 		return names
 	}
 }
+
+// rootDirLister lista las carpetas de la raíz de la nube con el propio listado del
+// proxy (base local), sin lanzar rclone. nil si no se puede.
+func rootDirLister(srv *webdav.Server) func() []string {
+	return func() []string {
+		fs := srv.FS()
+		if fs == nil {
+			return nil
+		}
+		f, err := fs.OpenFile(context.Background(), "/", os.O_RDONLY, 0)
+		if err != nil {
+			return nil
+		}
+		defer f.Close()
+		infos, err := f.Readdir(-1)
+		if err != nil {
+			return nil
+		}
+		var dirs []string
+		for _, fi := range infos {
+			if fi.IsDir() {
+				dirs = append(dirs, fi.Name())
+			}
+		}
+		return dirs // nil si aún no hay nada (base local sin cargar): se usa rclone lsf
+	}
+}
