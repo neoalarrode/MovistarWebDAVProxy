@@ -241,6 +241,8 @@ func (s *Service) args(conf string) []string {
 		// Todo lo escribe este mismo rclone, así que su caché de carpetas sigue al día;
 		// releer cada minuto obligaba al chunker a volver a leer sus metadatos.
 		"--dir-cache-time", "1h", "--log-level", "NOTICE",
+		// Búferes con mmap: devuelve antes la memoria al sistema (máquinas pequeñas).
+		"--use-mmap",
 		// Control remoto local (vfs/forget tras cada subida, ver Forget).
 		"--rc", "--rc-addr", RCAddr, "--rc-no-auth"}
 	if s.opts.User != "" {
