@@ -91,3 +91,28 @@ func TestTrackUpload_KeepsSeekAndResets(t *testing.T) {
 	}
 	h.Done()
 }
+
+// Una subida por la pasarela se ve desde que llega (nombre en claro y tamaño real) y
+// su trozo cifrado no aparece como otra subida.
+func TestPublicUpload_ShownOnceFromArrival(t *testing.T) {
+	old := Transfers
+	Transfers = NewTransferTracker(time.Minute)
+	t.Cleanup(func() { Transfers = old })
+	body, done := TrackPublicUpload("/emby/Netflix/Serie/E01.mkv", 1000, io.NopCloser(bytes.NewReader(make([]byte, 1000))))
+	uncover := CoverUploads("emby/abc/def")
+	got := Transfers.Snapshot()
+	if len(got) != 1 || got[0].Path != "/emby/Netflix/Serie/E01.mkv" || got[0].Size != 1000 {
+		t.Fatalf("debe verse desde que llega: %+v", got)
+	}
+	_, _ = io.CopyN(io.Discard, body, 400)
+	_, h := trackUpload("/emby/abc/def-chunk001_x1", 1048, bytes.NewReader(nil))
+	if got := Transfers.Snapshot(); len(got) != 1 || got[0].Bytes != 400 {
+		t.Fatalf("el trozo cifrado no debe contarse aparte: %+v", got)
+	}
+	h.Done()
+	uncover()
+	done()
+	if got := Transfers.Snapshot(); len(got) != 0 {
+		t.Fatalf("terminada no debe verse: %+v", got)
+	}
+}

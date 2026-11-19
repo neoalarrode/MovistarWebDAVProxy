@@ -28,6 +28,9 @@ import (
 )
 
 var (
+	// Cuotas que ya traiga la respuesta (p. ej. el rclone interno, que sin datos
+	// anuncia 1 PiB libre): se sustituyen por las de la cuenta.
+	anyQuotaRegex   = regexp.MustCompile(`(?is)<[dD]:quota-(available|used)-bytes>[^<]*</[dD]:quota-(available|used)-bytes>`)
 	emptyQuotaRegex = regexp.MustCompile(`(?i)<[dD]:quota-(available|used)-bytes(\s*/>|>\s*</[dD]:quota-(available|used)-bytes>)`)
 	empty404Regex   = regexp.MustCompile(`(?i)<[dD]:propstat>\s*<[dD]:prop>\s*</[dD]:prop>\s*<[dD]:status>HTTP/1\.1 404 Not Found</[dD]:status>\s*</[dD]:propstat>`)
 	re200Upper      = regexp.MustCompile(`(?i)</D:prop>\s*<D:status>HTTP/1\.1 200 OK</D:status>`)
@@ -705,6 +708,17 @@ func (p *putStatusInterceptor) WriteHeader(statusCode int) {
 	p.ResponseWriter.WriteHeader(statusCode)
 }
 
+// WithAccountQuota envuelve la respuesta de un PROPFIND servido por otro (la
+// pasarela del WebDAV público) para que lleve la cuota real de la cuenta, como las
+// del WebDAV en bruto. Llamar a la función devuelta al terminar.
+func (s *Server) WithAccountQuota(w http.ResponseWriter) (http.ResponseWriter, func()) {
+	if s == nil || s.fs == nil {
+		return w, func() {}
+	}
+	rw := &responseInterceptor{ResponseWriter: w, body: &bytes.Buffer{}, fs: s.fs}
+	return rw, rw.flush
+}
+
 type responseInterceptor struct {
 	http.ResponseWriter
 	body        *bytes.Buffer
@@ -754,6 +768,7 @@ func (r *responseInterceptor) flush() {
 		quotaXML := fmt.Sprintf("<%[1]s:quota-available-bytes>%[2]d</%[1]s:quota-available-bytes><%[1]s:quota-used-bytes>%[3]d</%[1]s:quota-used-bytes>", prefix, availBytes, usedBytes)
 
 		// 1. Limpiar cualquier tag vacío de cuota
+		rawXML = anyQuotaRegex.ReplaceAllString(rawXML, "")
 		rawXML = emptyQuotaRegex.ReplaceAllString(rawXML, "")
 
 		// 2. Limpiar cualquier <D:propstat> 404 que haya quedado con <D:prop></D:prop> vacío

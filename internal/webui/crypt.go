@@ -5,6 +5,7 @@ import (
 	"net/http"
 	"os"
 	"sort"
+	"strings"
 
 	"movistar-webdav-proxy/internal/config"
 	"movistar-webdav-proxy/internal/rcloneconf"
@@ -152,4 +153,60 @@ func (s *Server) handleCryptGenerate(w http.ResponseWriter, r *http.Request) {
 	}
 	s.restartCrypt()
 	jsonResponse(w, http.StatusOK, map[string]interface{}{"status": "ok", "config": text})
+}
+
+// handleMediaDiagnostics (solo lectura): lo que SAPI dice de uno o varios archivos
+// (?id=1&id=2...), para diagnosticar archivos sin URL de descarga.
+func (s *Server) handleMediaDiagnostics(w http.ResponseWriter, r *http.Request) {
+	ids := r.URL.Query()["id"]
+	if len(ids) == 0 || len(ids) > 50 || s.client == nil {
+		jsonResponse(w, http.StatusBadRequest, map[string]interface{}{"status": "error", "message": "indica de 1 a 50 ?id="})
+		return
+	}
+	var out []interface{}
+	for _, id := range ids {
+		d, err := s.client.MediaDiagnostics(id)
+		if err != nil {
+			out = append(out, map[string]interface{}{"id": id, "error": err.Error()})
+			continue
+		}
+		out = append(out, d)
+	}
+	jsonResponse(w, http.StatusOK, map[string]interface{}{"status": "ok", "media": out})
+}
+
+// handleCryptMkdir crea una carpeta en la raíz de la nube (en claro; luego se le
+// puede pegar su configuración o cifrar con clave nueva) y recarga el rclone interno.
+func (s *Server) handleCryptMkdir(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		jsonResponse(w, http.StatusMethodNotAllowed, map[string]interface{}{"status": "error"})
+		return
+	}
+	var req struct {
+		Name string `json:"name"`
+	}
+	if !decodeJSONBody(w, r, &req) {
+		return
+	}
+	name := strings.Trim(strings.TrimSpace(req.Name), "/")
+	if name == "" || strings.ContainsAny(name, `/\`) || name == "." || name == ".." {
+		jsonResponse(w, http.StatusBadRequest, map[string]interface{}{"status": "error", "message": "Indica un nombre de carpeta sin «/»."})
+		return
+	}
+	if s.webdavServer == nil || s.webdavServer.FS() == nil {
+		jsonResponse(w, http.StatusServiceUnavailable, map[string]interface{}{"status": "error", "message": "El WebDAV aún no está listo."})
+		return
+	}
+	for _, d := range s.rootDirs() {
+		if strings.EqualFold(d, name) {
+			jsonResponse(w, http.StatusConflict, map[string]interface{}{"status": "error", "message": "Ya existe esa carpeta."})
+			return
+		}
+	}
+	if err := s.webdavServer.FS().Mkdir(context.Background(), "/"+name, 0o755); err != nil {
+		jsonResponse(w, http.StatusInternalServerError, map[string]interface{}{"status": "error", "message": err.Error()})
+		return
+	}
+	s.restartCrypt()
+	jsonResponse(w, http.StatusOK, map[string]interface{}{"status": "ok"})
 }

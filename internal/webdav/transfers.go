@@ -239,9 +239,82 @@ func (c *countingReadSeeker) Seek(offset int64, whence int) (int64, error) {
 	return pos, err
 }
 
+// Rutas en bruto cuyas subidas ya muestra la pasarela del WebDAV público (con su
+// nombre en claro y su tamaño real): sus trozos cifrados no se listan aparte.
+var coveredUploads struct {
+	sync.Mutex
+	m map[string]int
+}
+
+// CoverUploads oculta en el panel las subidas en bruto que empiecen por prefix
+// hasta llamar a la función devuelta.
+func CoverUploads(prefix string) func() {
+	prefix = "/" + strings.Trim(prefix, "/")
+	coveredUploads.Lock()
+	if coveredUploads.m == nil {
+		coveredUploads.m = map[string]int{}
+	}
+	coveredUploads.m[prefix]++
+	coveredUploads.Unlock()
+	var once sync.Once
+	return func() {
+		once.Do(func() {
+			coveredUploads.Lock()
+			if coveredUploads.m[prefix]--; coveredUploads.m[prefix] <= 0 {
+				delete(coveredUploads.m, prefix)
+			}
+			coveredUploads.Unlock()
+		})
+	}
+}
+
+func uploadCovered(p string) bool {
+	p = "/" + strings.Trim(p, "/")
+	coveredUploads.Lock()
+	defer coveredUploads.Unlock()
+	for prefix := range coveredUploads.m {
+		if strings.HasPrefix(p, prefix) {
+			return true
+		}
+	}
+	return false
+}
+
+// startUploadMark registra una subida o una espera en cola, salvo que ya la muestre
+// la pasarela (nil: los métodos de TransferHandle no hacen nada).
+func startUploadMark(kind, path string, size int64) *TransferHandle {
+	if uploadCovered(path) {
+		return nil
+	}
+	return Transfers.Start(kind, path, size, 0)
+}
+
+// publicUploadBody cuenta lo que llega del cliente en una subida por la pasarela.
+type publicUploadBody struct {
+	io.ReadCloser
+	h *TransferHandle
+}
+
+func (b *publicUploadBody) Read(p []byte) (int, error) {
+	n, err := b.ReadCloser.Read(p)
+	b.h.Add(int64(n))
+	return n, err
+}
+
+// TrackPublicUpload muestra en el panel una subida que llega por la pasarela del
+// WebDAV público desde el primer momento, con su ruta en claro y su tamaño, y cuenta
+// lo recibido del cliente. Llamar a la función devuelta al terminar.
+func TrackPublicUpload(path string, size int64, body io.ReadCloser) (io.ReadCloser, func()) {
+	h := Transfers.Start("upload", path, size, 0)
+	if body == nil {
+		return body, h.Done
+	}
+	return &publicUploadBody{ReadCloser: body, h: h}, h.Done
+}
+
 // trackUpload envuelve el cuerpo de una subida a la nube para contar su avance.
 func trackUpload(path string, size int64, r io.Reader) (io.Reader, *TransferHandle) {
-	h := Transfers.Start("upload", path, size, 0)
+	h := startUploadMark("upload", path, size)
 	if rs, ok := r.(io.ReadSeeker); ok {
 		return &countingReadSeeker{countingReader: countingReader{r: rs, h: h}, s: rs}, h
 	}

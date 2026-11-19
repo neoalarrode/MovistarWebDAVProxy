@@ -33,7 +33,8 @@ func TestReadCopyStatus(t *testing.T) {
 			t.Errorf("%s: estado %q, esperado %q", l.Name, l.State, want[l.Name])
 		}
 	}
-	if st.Percent != "25" || st.Speed != "31.020 MiB/s" || st.ETA != "1h9m" || st.Total != "168.200 GiB" {
+	// La velocidad es la del propio proxy (aquí, sin subidas en curso).
+	if st.Percent != "25" || st.Speed != "0.000 B/s" || st.ETA != "1h9m" || st.Total != "168.200 GiB" {
 		t.Errorf("estadísticas mal leídas: %+v", st)
 	}
 	if st.ErrorCount != 1 || st.BWLimit != "20M" {

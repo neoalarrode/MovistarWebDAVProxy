@@ -2,6 +2,8 @@ package webui
 
 import (
 	"os"
+
+	"movistar-webdav-proxy/internal/webdav"
 	"path/filepath"
 	"testing"
 	"time"
@@ -23,6 +25,15 @@ func TestBuildFolders(t *testing.T) {
 	write("stats.json", `{"transferring":[{"name":"Serie/T1/e1.mkv","size":10,"bytes":1,"percentage":10}]}`)
 	write("mount-stats.json", `{"transferring":[{"name":"Netflix/Dark/e3.mkv","size":10,"bytes":3,"percentage":30},{"name":"Movistar+/nuevo.mkv","size":10,"bytes":2,"percentage":20}]}`)
 	write("vfs-queue.json", `{"queue":[{"name":"Movistar+/nuevo.mkv","uploading":true},{"name":"DVR/grab.ts","uploading":false}]}`)
+
+	// Las subidas salen del propio proxy (la de la copia y la del montaje).
+	old := webdav.Transfers
+	webdav.Transfers = webdav.NewTransferTracker(time.Minute)
+	t.Cleanup(func() { webdav.Transfers = old })
+	h1 := webdav.Transfers.Start("upload", "/emby/RTVE Play/Serie/T1/e1.mkv", 10, 0)
+	h2 := webdav.Transfers.Start("upload", "/emby/Movistar+/nuevo.mkv", 10, 0)
+	defer h1.Done()
+	defer h2.Done()
 
 	st := readCopyStatus(dir, "")
 	got := map[string]folderStatus{}

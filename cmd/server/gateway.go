@@ -50,8 +50,22 @@ func (g *decryptedGateway) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
+	if r.Method == "PROPFIND" {
+		// rclone no sabe la cuota de la cuenta y anuncia 1 PiB libre sin lo usado.
+		rw, flush := g.raw.WithAccountQuota(w)
+		g.upstream.ServeHTTP(rw, r)
+		flush()
+		return
+	}
 	if r.Method == http.MethodPut {
+		// El panel muestra la subida desde que llega, con su nombre en claro y su
+		// tamaño, en vez de esperar a que el rclone interno empiece a mandar el trozo
+		// cifrado (que se oculta para no contarla dos veces).
+		body, done := webdav.TrackPublicUpload(path.Clean("/"+r.URL.Path), r.ContentLength, r.Body)
+		r.Body = body
+		defer done()
 		if raw, ok := rawPathFor(r.URL.Path); ok {
+			defer webdav.CoverUploads(raw)()
 			// rclone no reenvía la cabecera: se marca la ruta en bruto que va a escribir.
 			if strings.EqualFold(strings.TrimSpace(r.Header.Get("X-Upload-Priority")), "bulk") {
 				defer webdav.MarkBulkPath(raw)()

@@ -2379,7 +2379,7 @@ func (w *WebDAVFileWriter) startStreamUpload(initialBytes []byte) {
 
 	go func() {
 		if !w.slotHeld {
-			queued := Transfers.Start("queued", w.path, expectedSize, 0)
+			queued := startUploadMark("queued", w.path, expectedSize)
 			uploads.acquire(w.isBulk())
 			queued.Done()
 		}
@@ -2592,7 +2592,7 @@ func (w *WebDAVFileWriter) Write(p []byte) (n int, err error) {
 			// Sin hueco libre: se encola. El cuerpo se guarda en RAM mientras quepa en
 			// el presupuesto de la cola y, si no, en disco; se sube al tener hueco.
 			w.queued = true
-			w.queuedMark = Transfers.Start("queued", w.path, w.guard.expected, 0)
+			w.queuedMark = startUploadMark("queued", w.path, w.guard.expected)
 			if reserveQueueRAM(int64(w.buf.Len())) {
 				w.queueRAM = int64(w.buf.Len())
 			} else if err := w.spoolToDisk(); err != nil {
@@ -2668,7 +2668,7 @@ func (w *WebDAVFileWriter) Write(p []byte) (n int, err error) {
 	if !reserveQueueRAM(int64(len(p))) {
 		if !uploadSpoolEnabled() && w.canStream() {
 			w.queued = true
-			w.queuedMark = Transfers.Start("queued", w.path, w.guard.expected, 0)
+			w.queuedMark = startUploadMark("queued", w.path, w.guard.expected)
 			w.size -= int64(len(p)) // writeQueued lo vuelve a sumar
 			return w.writeQueued(p)
 		}

@@ -6,6 +6,7 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+	"sync/atomic"
 	"time"
 )
 
@@ -65,6 +66,13 @@ func readFreshJSON(path string, staleAfter time.Duration, dst interface{}) bool 
 	return err == nil && json.Unmarshal(b, dst) == nil
 }
 
+// cloudFolders lista las carpetas de la nube donde la copia deja las bibliotecas,
+// con sus nombres en claro (nil si no se puede).
+var cloudFolders atomic.Value // func() []string
+
+// SetCloudFolders fija cómo listar las carpetas de la copia en la nube.
+func SetCloudFolders(f func() []string) { cloudFolders.Store(f) }
+
 func buildFolders(dir string, st copyStatus, copyUploads int) []folderStatus {
 	var detected struct {
 		Folders []struct {
@@ -82,8 +90,21 @@ func buildFolders(dir string, st copyStatus, copyUploads int) []folderStatus {
 		order = append(order, name)
 		return byName[name]
 	}
-	autodetected := readFreshJSON(filepath.Join(dir, "folders.json"), 10*time.Minute, &detected)
-	if autodetected {
+	// Las carpetas de la nube salen del propio proxy (su listado, ya descifrado); el
+	// volcado del host (folders.json) solo queda de respaldo.
+	autodetected := false
+	if f := cloudFolders.Load(); f != nil {
+		if names := f.(func() []string)(); names != nil {
+			autodetected = true
+			for _, n := range names {
+				add(n).InCloud = true
+			}
+		}
+	}
+	if !autodetected {
+		autodetected = readFreshJSON(filepath.Join(dir, "folders.json"), 10*time.Minute, &detected)
+	}
+	if len(detected.Folders) > 0 {
 		for _, f := range detected.Folders {
 			add(f.Name).InCloud = f.InCloud
 		}
@@ -202,9 +223,7 @@ func separateMountUploads(dir string, st *copyStatus) {
 	}
 	reads := st.Reading[:0]
 	for _, r := range st.Reading {
-		if uploading[r.Name] {
-			st.Uploading = append(st.Uploading, r)
-		} else {
+		if !uploading[r.Name] { // las subidas ya salen del propio proxy
 			reads = append(reads, r)
 		}
 	}

@@ -321,9 +321,16 @@ func readCopyStatusWith(dir, controlDir string, reads *readTracker) copyStatus {
 		st.Reading, st.ReadSpeed = rd, sp
 	}
 
-	// Recuento de subidas de la copia antes de añadir las del montaje: buildFolders
-	// atribuye las de la copia a la carpeta en curso y las del montaje por su ruta.
-	copyUploads := len(st.Uploading)
+	// Las subidas y su velocidad salen siempre del propio proxy: ve todas las vías
+	// (copia, montaje, SMB...) desde que llegan, con su nombre en claro y la carpeta
+	// como primer componente. Del registro de la copia solo quedan el total pendiente,
+	// el porcentaje y el tiempo restante.
+	st.Uploading, st.UploadSpeed = proxyUploads()
+	if st.UploadSpeed > 0 || st.Current != "" {
+		st.Speed = humanBytes(st.UploadSpeed) + "/s"
+	}
+	copyUploads := 0
+	// Las subidas del montaje (cola de su caché) ya las cuenta el proxy: fuera de las lecturas.
 	separateMountUploads(dir, &st)
 	if reads != nil {
 		st.Reading = reads.merge(st.Reading, time.Now())
@@ -388,10 +395,7 @@ func fillFromProxy(st *copyStatus) {
 	var up, rd, q []copyTransfer
 	var upSpeed, rdSpeed float64
 	for _, t := range webdav.Transfers.Snapshot() {
-		name := t.Display
-		if name == "" {
-			name = strings.TrimPrefix(t.Path, "/")
-		}
+		name := panelName(t)
 		ct := copyTransfer{Name: name, Size: t.Size, Bytes: t.Bytes, Percentage: t.Percentage,
 			Speed: t.Speed, ETA: t.ETA, Idle: t.Idle, IdleSeconds: t.IdleSeconds}
 		switch t.Kind {
@@ -416,4 +420,38 @@ func fillFromProxy(st *copyStatus) {
 	if len(st.Reading) == 0 && len(rd) > 0 {
 		st.Reading, st.ReadSpeed = rd, rdSpeed
 	}
+}
+
+// copyCloudFolder es la carpeta de la nube donde la copia deja las bibliotecas
+// (COPY_CLOUD_FOLDER, por defecto «emby»): en el panel las rutas empiezan por la
+// biblioteca.
+func copyCloudFolder() string {
+	if v := strings.Trim(strings.TrimSpace(os.Getenv("COPY_CLOUD_FOLDER")), "/"); v != "" {
+		return v
+	}
+	return "emby"
+}
+
+// panelName es el nombre legible de una transferencia, relativo a la carpeta de la copia.
+func panelName(t webdav.TransferInfo) string {
+	name := t.Display
+	if name == "" {
+		name = t.Path
+	}
+	name = strings.TrimPrefix(name, "/")
+	return strings.TrimPrefix(name, copyCloudFolder()+"/")
+}
+
+// proxyUploads son las subidas en curso que ve el proxy y su velocidad total.
+func proxyUploads() ([]copyTransfer, float64) {
+	up := []copyTransfer{}
+	var speed float64
+	for _, t := range webdav.Transfers.Snapshot() {
+		if t.Kind != "upload" {
+			continue
+		}
+		up = append(up, copyTransfer{Name: panelName(t), Size: t.Size, Bytes: t.Bytes, Percentage: t.Percentage, Speed: t.Speed, ETA: t.ETA})
+		speed += t.Speed
+	}
+	return up, speed
 }

@@ -139,3 +139,11 @@ func TestExpectUploadSize(t *testing.T) {
 		t.Fatal("registro no liberado")
 	}
 }
+
+// La cuota que traiga la respuesta (1 PiB del rclone interno) se sustituye por la real.
+func TestAnyQuotaRegex(t *testing.T) {
+	in := `<D:prop><D:quota-available-bytes>1125899906842624</D:quota-available-bytes><D:quota-used-bytes>0</D:quota-used-bytes></D:prop>`
+	if out := anyQuotaRegex.ReplaceAllString(in, ""); out != "<D:prop></D:prop>" {
+		t.Fatalf("quedó: %s", out)
+	}
+}

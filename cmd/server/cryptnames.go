@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"os"
 	"strings"
 	"sync"
@@ -104,4 +105,49 @@ func setupCrypt(webdavPort, rawPort string) *rclonesvc.Service {
 		svc.Restart()
 	}
 	return svc
+}
+
+// cloudFolderLister lista, con sus nombres en claro, las carpetas que hay dentro de
+// la carpeta de la copia en la nube (COPY_CLOUD_FOLDER, por defecto «emby»): las
+// bibliotecas que muestra el panel. Sale del listado del proxy, sin pedir nada nuevo.
+func cloudFolderLister(srv *webdav.Server) func() []string {
+	return func() []string {
+		folder := strings.Trim(strings.TrimSpace(os.Getenv("COPY_CLOUD_FOLDER")), "/")
+		if folder == "" {
+			folder = "emby"
+		}
+		fs := srv.FS()
+		if fs == nil {
+			return nil
+		}
+		f, err := fs.OpenFile(context.Background(), "/"+folder, os.O_RDONLY, 0)
+		if err != nil {
+			return nil
+		}
+		defer f.Close()
+		infos, err := f.Readdir(-1)
+		if err != nil {
+			return nil
+		}
+		var c *cryptname.Cipher
+		if v, ok := folderNames.Load(folder); ok {
+			c = v.(*cryptname.Cipher)
+		}
+		names := []string{}
+		for _, fi := range infos {
+			if !fi.IsDir() {
+				continue
+			}
+			name := fi.Name()
+			if c != nil {
+				d, err := c.DecryptSegment(name)
+				if err != nil {
+					continue // no es de esta clave
+				}
+				name = d
+			}
+			names = append(names, name)
+		}
+		return names
+	}
 }
