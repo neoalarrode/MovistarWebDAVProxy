@@ -2,7 +2,9 @@ package webui
 
 import (
 	"encoding/json"
+
 	"fmt"
+	"movistar-webdav-proxy/internal/webdav"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -12,8 +14,8 @@ import (
 
 // handleCopyEvents envía el estado de la copia en cuanto cambia (Server-Sent
 // Events), para que la tarjeta se actualice en tiempo real sin consultar cada X
-// segundos. Vigila cada 250 ms las fechas y tamaños de los archivos de los que sale
-// el estado; si nada cambia, manda un latido cada 15 s.
+// segundos. Vigila cada segundo la actividad del proxy y las fechas y tamaños de los
+// archivos de la copia; si nada cambia, manda un latido cada 15 s.
 func (s *Server) handleCopyEvents(w http.ResponseWriter, r *http.Request) {
 	rc := http.NewResponseController(w)
 	w.Header().Set("Content-Type", "text/event-stream")
@@ -33,7 +35,7 @@ func (s *Server) handleCopyEvents(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	tick := time.NewTicker(250 * time.Millisecond)
+	tick := time.NewTicker(time.Second)
 	defer tick.Stop()
 	var lastSig string
 	lastSent := time.Time{}
@@ -61,10 +63,16 @@ func (s *Server) handleCopyEvents(w http.ResponseWriter, r *http.Request) {
 // copySignature resume la fecha y el tamaño de los archivos de estado de la copia:
 // si cambia, hay algo nuevo que enviar.
 func (s *Server) copySignature() string {
-	if s.copyDir == "" {
-		return ""
-	}
 	var b strings.Builder
+	// La actividad (subidas, lecturas, cola) sale del propio proxy: cualquier cambio
+	// de lo que hay en curso o de su avance (por MB) es algo nuevo que enviar.
+	for _, t := range webdav.Transfers.Snapshot() {
+		fmt.Fprintf(&b, "%s|%s|%d;", t.Kind, t.Path, t.Bytes>>20)
+	}
+	b.WriteString("#")
+	if s.copyDir == "" {
+		return b.String()
+	}
 	stamp := func(path string) {
 		if fi, err := os.Stat(path); err == nil {
 			fmt.Fprintf(&b, "%d:%d;", fi.ModTime().UnixNano(), fi.Size())
@@ -79,7 +87,5 @@ func (s *Server) copySignature() string {
 	if s.copyControlDir != "" {
 		stamp(filepath.Join(s.copyControlDir, "bwlimit"))
 	}
-	// Las lecturas "en búfer" envejecen aunque no cambie ningún archivo.
-	fmt.Fprintf(&b, "%d", time.Now().Unix()/5)
 	return b.String()
 }

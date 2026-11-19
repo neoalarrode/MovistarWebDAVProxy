@@ -3,6 +3,7 @@ package webui
 import (
 	"bufio"
 	"context"
+	"movistar-webdav-proxy/internal/webdav"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -63,5 +64,24 @@ func TestCopyEvents_PushesOnChange(t *testing.T) {
 	write("progress.log", "2026-11-14 10:00:00 INICIO A\n2026-11-14 10:05:00 FIN A rc=0\n2026-11-14 10:05:01 INICIO B\n")
 	if e := next(); !strings.Contains(e, `"current":"B"`) {
 		t.Fatalf("tras el cambio: %s", e)
+	}
+}
+
+// La señal de cambio incluye la actividad del proxy, haya o no copia del host.
+func TestCopySignature_IncludesProxyActivity(t *testing.T) {
+	old := webdav.Transfers
+	webdav.Transfers = webdav.NewTransferTracker(time.Minute)
+	t.Cleanup(func() { webdav.Transfers = old })
+	s := &Server{}
+	before := s.copySignature()
+	h := webdav.Transfers.Start("upload", "/emby/a.mkv", 10<<20, 0)
+	defer h.Done()
+	if s.copySignature() == before {
+		t.Fatal("una subida nueva debe cambiar la señal")
+	}
+	mid := s.copySignature()
+	h.Add(3 << 20)
+	if s.copySignature() == mid {
+		t.Fatal("el avance de una subida debe cambiar la señal")
 	}
 }
