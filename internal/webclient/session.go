@@ -74,6 +74,7 @@ type Session struct {
 	renewMu      sync.RWMutex
 	lastRenewAt  time.Time
 	lastRenewTry time.Time
+	renewFails   int // renovaciones fallidas seguidas (se borra el estado de la web al llegar a renewMaxFails)
 }
 
 // Response es la respuesta de una llamada a SAPI hecha desde la pestaña.

@@ -25,7 +25,11 @@ const (
 
 	defaultRenewBefore = time.Hour
 	renewRetryAfter    = 10 * time.Minute
-	renewWait          = 30 * time.Second
+	renewWait          = 60 * time.Second // una máquina pequeña tarda más en cargar la web
+	// renewMaxFails: solo tras estos fallos seguidos se da la PLC por perdida y se
+	// borra el estado de la web. Un fallo suelto (Movistar lento) no obliga a entrar
+	// a mano: se reintenta pasados renewRetryAfter con la PLC intacta.
+	renewMaxFails = 3
 )
 
 var errNoRemember = errors.New(`no hay cookie de "No cerrar sesión" (PLC): inicia sesión con e-mail y contraseña marcándola`)
@@ -162,13 +166,20 @@ func (s *Session) Renew(ctx context.Context) error {
 			continue
 		}
 		s.stateMu.Lock()
-		s.expires, s.lastRenewAt = expires, time.Now()
+		s.expires, s.lastRenewAt, s.renewFails = expires, time.Now(), 0
 		s.stateMu.Unlock()
 		s.setLoggedIn(true)
 		logger.Log("[WebSession] ✔ Sesión web renovada sin iniciar sesión; caduca %s.", expires.Local().Format("02/01 15:04"))
 		return nil
 	}
 	s.setLoggedIn(false)
+	s.stateMu.Lock()
+	s.renewFails++
+	fails := s.renewFails
+	s.stateMu.Unlock()
+	if fails < renewMaxFails {
+		return fmt.Errorf("la web no reentró con la PLC (intento %d de %d); se reintenta en %s sin borrar nada", fails, renewMaxFails, renewRetryAfter)
+	}
 	// Con la sesión invalidada por Movistar la web se queda cargando (logo girando)
 	// y no llega a mostrar el login: no basta con borrar PLC y JSESSIONID, también
 	// guarda estado en el almacenamiento del sitio. Se borra todo lo de la web
@@ -179,7 +190,7 @@ func (s *Session) Renew(ctx context.Context) error {
 	}
 	_ = chromedp.Do(tab, chromedp.Navigate(PortalURL+"/login"))
 	s.stateMu.Lock()
-	s.remember = false
+	s.remember, s.renewFails = false, 0
 	s.stateMu.Unlock()
-	return errors.New("la web no reentró con la PLC (caducada o invalidada); se ha borrado el estado de la web y la página de inicio de sesión queda lista en el panel")
+	return errors.New("la web no reentró con la PLC tras varios intentos (caducada o invalidada); se ha borrado el estado de la web y la página de inicio de sesión queda lista en el panel")
 }
