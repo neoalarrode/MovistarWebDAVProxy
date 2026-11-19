@@ -2286,7 +2286,11 @@ func (c *Client) UploadFileToFolder(fileName string, reader io.Reader, size int6
 			_, _ = seeker.Seek(0, io.SeekStart)
 		}
 
-		body, length, ctype, closeBody := uploadBody(metaBytes, fileName, reader, size)
+		// Siempre en flujo «chunked», sin Content-Length: así Movistar rechaza al
+		// instante (MED-1048) lo que pasa del tamaño que permite a la cuenta. Con
+		// Content-Length lee el principio y se queda callado (subida colgada; medido
+		// el 19/11/2026), y no hay forma de detectar el límite.
+		body, length, ctype, closeBody := uploadBody(metaBytes, fileName, reader, -1)
 		req, err := http.NewRequest("POST", uploadEndpoint, body)
 		if err != nil {
 			closeBody()
@@ -2729,9 +2733,10 @@ var (
 )
 
 // uploadBody arma el formulario de una subida (campo «data» con los metadatos y el
-// archivo). Con el tamaño conocido, como la web, devuelve su longitud exacta para
-// enviarla con Content-Length (cabeceras + archivo + cierre, con el archivo en flujo
-// detrás); si no, lo genera sobre una tubería (longitud -1, «chunked»).
+// archivo). Con size >= 0 devuelve su longitud exacta para enviarla con
+// Content-Length (cabeceras + archivo + cierre, con el archivo en flujo detrás); con
+// size < 0 lo genera sobre una tubería (longitud -1, «chunked»). UploadFileToFolder
+// usa siempre «chunked» (ver allí por qué).
 func uploadBody(metaBytes []byte, fileName string, reader io.Reader, size int64) (io.Reader, int64, string, func()) {
 	if size >= 0 {
 		var head bytes.Buffer
