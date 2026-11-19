@@ -87,7 +87,7 @@ func TestWriteConfig_AutoChunkCap(t *testing.T) {
 		t.Fatal(err)
 	}
 	b, _ := os.ReadFile(path)
-	if !strings.Contains(string(b), "chunk_size = 512Mi") {
-		t.Fatalf("esperado trozo de 512 MiB:\n%s", b)
+	if !strings.Contains(string(b), "chunk_size = 95Mi") {
+		t.Fatalf("esperado trozo de 95 MiB:\n%s", b)
 	}
 }

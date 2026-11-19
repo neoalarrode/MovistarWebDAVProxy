@@ -113,8 +113,8 @@ func setupCrypt(webdavPort, rawPort string) *rclonesvc.Service {
 }
 
 // setupAutoChunk baja solo el tamaño de trozo cuando Movistar rechaza subidas por
-// tamaño (MED-1048) y recarga el rclone interno con el nuevo (sin cortar más de una
-// vez por minuto: las subidas en curso se cortan y el cliente las reintenta).
+// tamaño (MED-1048) y recarga el rclone interno con el nuevo (agrupando los rechazos
+// de 15 s: las subidas en curso se cortan y el cliente las reintenta).
 func setupAutoChunk(svc *rclonesvc.Service) {
 	autochunk.Load()
 	if c := autochunk.Chunk(); c > 0 {
@@ -137,7 +137,7 @@ func setupAutoChunk(svc *rclonesvc.Service) {
 		pending = true
 		mu.Unlock()
 		go func() {
-			time.Sleep(time.Minute) // agrupa los rechazos de las subidas que van en paralelo
+			time.Sleep(15 * time.Second) // agrupa los rechazos de las subidas que van en paralelo
 			mu.Lock()
 			pending = false
 			mu.Unlock()

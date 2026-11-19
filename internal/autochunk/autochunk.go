@@ -19,6 +19,15 @@ import (
 // MinChunk es el mínimo al que se baja (por debajo, demasiados objetos en la nube).
 const MinChunk int64 = 8 << 20
 
+// KnownLimit es el primer escalón: por debajo del límite que aplica Movistar
+// (100 MB, medido el 19/11/2026 y descrito por otros usuarios en su foro), para no
+// perder varios escalones bajando a la mitad.
+const KnownLimit int64 = 95 << 20
+
+// MinRejectSize: los MED-1048 de subidas más pequeñas no cuentan (pueden ser el error
+// pasajero de siempre, no un límite de tamaño).
+const MinRejectSize int64 = 32 << 20
+
 // State es el estado guardado.
 type State struct {
 	Chunk      int64     `json:"chunk"`       // tamaño de trozo en vigor (0 = el de la configuración)
@@ -93,6 +102,9 @@ func Accepted(size int64) {
 // baja el tamaño de trozo. current es el tamaño de trozo con el que se subía (0 si
 // no se sabe). Devuelve el nuevo tamaño si ha cambiado.
 func Rejected(size, current int64) (int64, bool) {
+	if size < MinRejectSize {
+		return Chunk(), false
+	}
 	mu.Lock()
 	if st.Since.IsZero() {
 		st.Since = time.Now()
@@ -113,8 +125,12 @@ func Rejected(size, current int64) (int64, bool) {
 	if size < limit {
 		limit = size
 	}
-	// Lo más grande que se sabe que pasa o, si no, la mitad del rechazo.
+	// Lo más grande que se sabe que pasa o, si no, la mitad del rechazo; la primera
+	// vez, directamente por debajo del límite conocido de Movistar.
 	next := st.Rejected / 2
+	if st.Chunk == 0 && st.Rejected > KnownLimit {
+		next = KnownLimit
+	}
 	if st.MaxOK > next && st.MaxOK < st.Rejected {
 		next = st.MaxOK
 	}

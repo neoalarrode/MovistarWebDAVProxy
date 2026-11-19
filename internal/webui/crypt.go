@@ -76,6 +76,21 @@ func (s *Server) handleCryptStatus(w http.ResponseWriter, r *http.Request) {
 	jsonResponse(w, http.StatusOK, out)
 }
 
+// ensureRootDir crea la carpeta de la raíz si aún no existe: el rclone interno no
+// arranca bien con una rama que apunta a una carpeta inexistente.
+func (s *Server) ensureRootDir(name string) error {
+	name = strings.Trim(strings.TrimSpace(name), "/")
+	if name == "" || s.webdavServer == nil || s.webdavServer.FS() == nil {
+		return nil
+	}
+	for _, d := range s.rootDirs() {
+		if d == name {
+			return nil
+		}
+	}
+	return s.webdavServer.FS().Mkdir(context.Background(), "/"+name, 0o755)
+}
+
 func (s *Server) restartCrypt() {
 	if s.crypt != nil {
 		s.crypt.Restart()
@@ -91,6 +106,10 @@ func (s *Server) handleCryptFolder(w http.ResponseWriter, r *http.Request) {
 	}
 	var f vault.Folder
 	if !decodeJSONBody(w, r, &f) {
+		return
+	}
+	if err := s.ensureRootDir(f.Name); err != nil {
+		jsonResponse(w, http.StatusInternalServerError, map[string]interface{}{"status": "error", "message": "No se pudo crear la carpeta en la nube: " + err.Error()})
 		return
 	}
 	ch, err := vault.SaveFolder(f)
@@ -148,6 +167,10 @@ func (s *Server) handleCryptGenerate(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	text := vault.StandardConfig(c)
+	if err := s.ensureRootDir(req.Name); err != nil {
+		jsonResponse(w, http.StatusInternalServerError, map[string]interface{}{"status": "error", "message": "No se pudo crear la carpeta en la nube: " + err.Error()})
+		return
+	}
 	if _, err := vault.SaveFolder(vault.Folder{Name: req.Name, Config: text}); err != nil {
 		jsonResponse(w, http.StatusBadRequest, map[string]interface{}{"status": "error", "message": err.Error()})
 		return
