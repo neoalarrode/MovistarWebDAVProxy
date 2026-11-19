@@ -12,8 +12,8 @@ import (
 )
 
 func TestParseRcloneSize(t *testing.T) {
-	for in, want := range map[string]int64{"1Gi": 1 << 30, "1G": 1 << 30, "512M": 512 << 20, "100k": 100 << 10, "2": 2 << 10, "1.5Mi": 3 << 19} {
-		if got, err := parseRcloneSize(in); err != nil || got != want {
+	for in, want := range map[string]int64{"1Gi": 1 << 30, "1G": 1 << 30, "512M": 512 << 20, "100k": 100 << 10, "2": 2 << 10, "1.5Mi": 3 << 19, "512B": 512, "100Mi": 100 << 20, "1GiB": 1 << 30} {
+		if got, err := rcloneconf.ParseSize(in); err != nil || got != want {
 			t.Errorf("%s = %d (%v), esperado %d", in, got, err, want)
 		}
 	}

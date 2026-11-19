@@ -1,7 +1,6 @@
 package main
 
 import (
-	"fmt"
 	"regexp"
 	"strconv"
 	"strings"
@@ -26,33 +25,6 @@ func cryptEncryptedSize(size int64) int64 {
 		n += cryptBlockOverhead + residue
 	}
 	return n
-}
-
-// parseRcloneSize interpreta un tamaño de rclone («1Gi», «1G», «512M», «100k»…):
-// como en rclone, K/M/G/T son potencias de 1024 y sin sufijo son KiB.
-func parseRcloneSize(s string) (int64, error) {
-	s = strings.TrimSpace(s)
-	if s == "" {
-		return 0, fmt.Errorf("tamaño vacío")
-	}
-	s = strings.TrimSuffix(strings.TrimSuffix(s, "B"), "b")
-	s = strings.TrimSuffix(s, "i")
-	mult := int64(1024)
-	switch strings.ToUpper(s[len(s)-1:]) {
-	case "K":
-		mult, s = 1<<10, s[:len(s)-1]
-	case "M":
-		mult, s = 1<<20, s[:len(s)-1]
-	case "G":
-		mult, s = 1<<30, s[:len(s)-1]
-	case "T":
-		mult, s = 1<<40, s[:len(s)-1]
-	}
-	f, err := strconv.ParseFloat(s, 64)
-	if err != nil || f <= 0 {
-		return 0, fmt.Errorf("tamaño no válido: %q", s)
-	}
-	return int64(f * float64(mult)), nil
 }
 
 // uploadSizer calcula, para un archivo de tamaño size subido a la carpeta, el
@@ -84,7 +56,7 @@ func newUploadSizer(ch *rcloneconf.Chain) *uploadSizer {
 			if cs == "" {
 				cs = "2Gi" // valor por defecto de rclone chunker
 			}
-			n, err := parseRcloneSize(cs)
+			n, err := rcloneconf.ParseSize(cs)
 			if err != nil {
 				return nil
 			}

@@ -259,6 +259,10 @@
             <span id="cr-state" class="px-3 py-1 rounded-full text-xs font-semibold bg-slate-100 text-slate-600">-</span>
         </div>
         <p class="text-sm text-slate-600 mb-3">El WebDAV sirve la nube desde la raíz. Cada carpeta puede llevar su propia configuración de rclone (cifrado, troceado…, cada una con su clave) y se ve ya descifrada; las demás se sirven tal cual.</p>
+        <div id="cr-auto" class="hidden mb-3 p-3 rounded-xl bg-amber-50 border border-amber-200 text-xs text-amber-900 flex flex-wrap items-center justify-between gap-2">
+            <span id="cr-auto-text"></span>
+            <button onclick="resetAutoChunk()" class="px-2.5 py-1 rounded-lg font-semibold border bg-white hover:bg-amber-100 border-amber-300">Volver al tamaño de la configuración</button>
+        </div>
         <div id="cr-list" class="divide-y divide-slate-100 text-sm"></div>
         <div class="flex flex-wrap gap-2 mt-3">
             <input id="cr-mkdir" type="text" placeholder="Nueva carpeta en la raíz" class="flex-1 min-w-[12rem] px-3 py-1.5 bg-slate-50 border border-slate-200 rounded-lg text-xs font-mono" onkeydown="if (event.key === 'Enter') createRootFolder()">
@@ -829,8 +833,21 @@
                 row.append(label, btns);
                 list.append(row);
             }
+            const ac = d.autochunk || {}, acBox = document.getElementById('cr-auto');
+            if (ac.chunk > 0) {
+                const mib = n => Math.round(n / 1048576);
+                document.getElementById('cr-auto-text').textContent = `✂️ Movistar rechaza subidas grandes (MED-1048): trozos de ${mib(ac.chunk)} MiB desde ${new Date(ac.last_change).toLocaleString()}` + (ac.rejected ? ` · rechazada desde ${mib(ac.rejected)} MiB` : '') + (ac.max_ok ? ` · aceptada hasta ${mib(ac.max_ok)} MiB` : '') + '. Lo ya subido se sigue leyendo igual.';
+                acBox.classList.remove('hidden');
+            } else acBox.classList.add('hidden');
             if (svc.error) { const e = document.createElement('p'); e.className = 'text-xs text-rose-600 pt-2'; e.textContent = 'rclone interno: ' + svc.error; list.append(e); }
             if (nConf && !d.secrets_encrypted) { const e = document.createElement('p'); e.className = 'text-xs text-amber-700 pt-2'; e.textContent = '⚠️ Sin TOKENS_ENCRYPTION_KEY las configuraciones se guardan sin cifrar.'; list.append(e); }
+        }
+
+        async function resetAutoChunk() {
+            if (!confirm('¿Volver al tamaño de trozo de la configuración? Si Movistar sigue limitando, se volverá a bajar solo tras dos rechazos.')) return;
+            const data = await (await fetch('/crypt_autochunk_reset', {method: 'POST'})).json();
+            if (data.status === 'ok') showToast('Tamaño de trozo restablecido'); else showToast(data.message || 'Error', 'error');
+            refreshCrypt();
         }
 
         async function createRootFolder() {

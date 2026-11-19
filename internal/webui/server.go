@@ -173,6 +173,7 @@ func (s *Server) Routes() http.Handler {
 	mux.HandleFunc("/media_diagnostics", s.handleMediaDiagnostics)
 	mux.HandleFunc("/crypt_folder", s.handleCryptFolder)
 	mux.HandleFunc("/crypt_mkdir", s.handleCryptMkdir)
+	mux.HandleFunc("/crypt_autochunk_reset", s.handleAutoChunkReset)
 	mux.HandleFunc("/crypt_folder_delete", s.handleCryptFolderDelete)
 	mux.HandleFunc("/crypt_generate", s.handleCryptGenerate)
 	mux.HandleFunc("/copy_status", s.handleCopyStatus)

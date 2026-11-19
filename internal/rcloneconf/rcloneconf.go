@@ -8,7 +8,9 @@ import (
 	"bufio"
 	"errors"
 	"fmt"
+	"regexp"
 	"sort"
+	"strconv"
 	"strings"
 )
 
@@ -161,3 +163,53 @@ func (c *Chain) Crypt() *Section {
 	}
 	return nil
 }
+
+// CapChunkSize limita a n bytes el chunk_size de los chunker de la cadena (si lo
+// tienen mayor). Devuelve si cambió algo.
+func (c *Chain) CapChunkSize(n int64, parse func(string) (int64, error)) bool {
+	if n <= 0 {
+		return false
+	}
+	changed := false
+	for i := range c.Sections {
+		s := &c.Sections[i]
+		if s.Get("type") != "chunker" {
+			continue
+		}
+		cur := s.Get("chunk_size")
+		if cur == "" {
+			cur = "2Gi"
+		}
+		if v, err := parse(cur); err == nil && v <= n {
+			continue
+		}
+		// En MiB si es exacto (rclone lee un número sin sufijo como KiB).
+		if n%(1<<20) == 0 {
+			s.set("chunk_size", fmt.Sprintf("%dMi", n>>20))
+		} else {
+			s.set("chunk_size", fmt.Sprintf("%dB", n))
+		}
+		changed = true
+	}
+	return changed
+}
+
+// ParseSize interpreta un tamaño de rclone («1Gi», «1G», «512M», «100k», «512B»…):
+// como en rclone, K/M/G/T son potencias de 1024, «B» son bytes y sin sufijo, KiB.
+func ParseSize(v string) (int64, error) {
+	m := sizeRe.FindStringSubmatch(strings.TrimSpace(v))
+	if m == nil {
+		return 0, fmt.Errorf("tamaño no válido: %q", v)
+	}
+	f, err := strconv.ParseFloat(m[1], 64)
+	if err != nil || f <= 0 {
+		return 0, fmt.Errorf("tamaño no válido: %q", v)
+	}
+	mult := map[string]float64{"": 1 << 10, "K": 1 << 10, "M": 1 << 20, "G": 1 << 30, "T": 1 << 40, "P": 1 << 50}[strings.ToUpper(m[2])]
+	if m[2] == "" && m[4] != "" {
+		mult = 1 // «512B»: bytes
+	}
+	return int64(f * mult), nil
+}
+
+var sizeRe = regexp.MustCompile(`^([0-9]+(?:\.[0-9]+)?)\s*([KkMmGgTtPp]?)(i?)([Bb]?)$`)

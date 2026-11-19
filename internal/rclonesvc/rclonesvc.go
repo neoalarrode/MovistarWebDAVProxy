@@ -20,6 +20,7 @@ import (
 	"sync"
 	"time"
 
+	"movistar-webdav-proxy/internal/autochunk"
 	"movistar-webdav-proxy/internal/cryptname"
 	"movistar-webdav-proxy/internal/logger"
 	"movistar-webdav-proxy/internal/rcloneconf"
@@ -167,6 +168,8 @@ func (s *Service) writeConfig(folders []vault.Folder, topDirs []string) (string,
 			logger.Log("[Descifrado] ⚠️ Configuración de «%s» no válida (%v): se sirve tal cual", f.Name, err)
 			continue
 		}
+		// Tamaño de trozo rebajado si Movistar rechaza las subidas grandes (autochunk).
+		ch.CapChunkSize(autochunk.Chunk(), rcloneconf.ParseSize)
 		configured[f.Name] = true
 		b.WriteString(ch.String())
 		upstreams = append(upstreams, fmt.Sprintf("%q", fmt.Sprintf("%s=%s:", f.Name, ch.Top)))

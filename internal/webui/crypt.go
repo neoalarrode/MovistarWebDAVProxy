@@ -7,6 +7,7 @@ import (
 	"sort"
 	"strings"
 
+	"movistar-webdav-proxy/internal/autochunk"
 	"movistar-webdav-proxy/internal/config"
 	"movistar-webdav-proxy/internal/rcloneconf"
 	"movistar-webdav-proxy/internal/rclonesvc"
@@ -68,7 +69,7 @@ func (s *Server) handleCryptStatus(w http.ResponseWriter, r *http.Request) {
 		list = append(list, f)
 	}
 	sort.Slice(list, func(i, j int) bool { return list[i].Name < list[j].Name })
-	out := map[string]interface{}{"folders": list, "secrets_encrypted": config.SecretsEncrypted()}
+	out := map[string]interface{}{"folders": list, "secrets_encrypted": config.SecretsEncrypted(), "autochunk": autochunk.Current()}
 	if s.crypt != nil {
 		out["service"] = s.crypt.Status()
 	}
@@ -208,5 +209,16 @@ func (s *Server) handleCryptMkdir(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	s.restartCrypt()
+	jsonResponse(w, http.StatusOK, map[string]interface{}{"status": "ok"})
+}
+
+// handleAutoChunkReset vuelve al tamaño de trozo de la configuración (si Movistar ya
+// no limita el tamaño de las subidas).
+func (s *Server) handleAutoChunkReset(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		jsonResponse(w, http.StatusMethodNotAllowed, map[string]interface{}{"status": "error"})
+		return
+	}
+	autochunk.Reset()
 	jsonResponse(w, http.StatusOK, map[string]interface{}{"status": "ok"})
 }

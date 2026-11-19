@@ -2412,6 +2412,11 @@ func (c *Client) UploadFileToFolder(fileName string, reader io.Reader, size int6
 			return nil, fmt.Errorf("upload failed: still in async validation (MED-1017) after %d retries: %s", maxRetries, bStr)
 		}
 
+		if res.Error != nil && res.Error.Code == "MED-1048" && UploadRejected != nil {
+			// Movistar lo usa también para rechazar subidas por encima del tamaño que
+			// permite a la cuenta (p. ej. 100 MiB tras mucho volumen).
+			UploadRejected(size)
+		}
 		if res.Error != nil && (res.Error.Code == "MED-1048" || res.Error.Code == "PAPI-0000") {
 			if attempt < maxRetries && canRetry {
 				c.httpClient.CloseIdleConnections()
@@ -2447,6 +2452,9 @@ func (c *Client) UploadFileToFolder(fileName string, reader io.Reader, size int6
 			_ = c.UpdateMedia(finalID, cloudName, fileName, folderID)
 		}
 
+		if UploadAccepted != nil {
+			UploadAccepted(size)
+		}
 		return &MediaItem{
 			ID:               finalID,
 			Name:             fileName,
@@ -2712,6 +2720,13 @@ func (c *Client) MediaDiagnostics(mediaID string) (map[string]interface{}, error
 	}
 	return out, nil
 }
+
+// UploadRejected y UploadAccepted, si se fijan, reciben el tamaño de cada subida
+// rechazada con MED-1048 o aceptada (ajuste automático del tamaño de trozo).
+var (
+	UploadRejected func(size int64)
+	UploadAccepted func(size int64)
+)
 
 // uploadBody arma el formulario de una subida (campo «data» con los metadatos y el
 // archivo). Con el tamaño conocido, como la web, devuelve su longitud exacta para

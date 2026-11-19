@@ -5,6 +5,8 @@ import (
 	"strings"
 	"testing"
 
+	"movistar-webdav-proxy/internal/autochunk"
+	"movistar-webdav-proxy/internal/config"
 	"movistar-webdav-proxy/internal/cryptname"
 	"movistar-webdav-proxy/internal/vault"
 )
@@ -68,5 +70,24 @@ func TestMountArgs_DefaultsMatchProduction(t *testing.T) {
 	s2 := New(Options{MountPath: "/x", MountArgs: []string{"--vfs-cache-mode", "off"}})
 	if g := strings.Join(s2.mountArgs("c"), " "); g != "mount raiz: /x --config c --vfs-cache-mode off" {
 		t.Errorf("WEBDAV_MOUNT_ARGS no sustituye: %s", g)
+	}
+}
+
+// Si Movistar rechaza las subidas grandes, el rclone interno trocea más pequeño.
+func TestWriteConfig_AutoChunkCap(t *testing.T) {
+	old := config.TokensDir
+	config.TokensDir = t.TempDir()
+	t.Cleanup(func() { config.TokensDir = old; autochunk.Reset() })
+	autochunk.Load()
+	autochunk.Rejected(1<<30, 1<<30)
+	autochunk.Rejected(1<<30, 1<<30)
+	s := New(Options{UpstreamURL: "http://127.0.0.1:8080", ConfigDir: t.TempDir()})
+	path, err := s.writeConfig([]vault.Folder{{Name: "emby", Config: vault.StandardConfig(vault.Crypt{Password: "x"})}}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	b, _ := os.ReadFile(path)
+	if !strings.Contains(string(b), "chunk_size = 512Mi") {
+		t.Fatalf("esperado trozo de 512 MiB:\n%s", b)
 	}
 }

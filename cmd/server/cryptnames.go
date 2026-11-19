@@ -5,11 +5,14 @@ import (
 	"os"
 	"strings"
 	"sync"
+	"time"
 
+	"movistar-webdav-proxy/internal/autochunk"
 	"movistar-webdav-proxy/internal/cryptname"
 	"movistar-webdav-proxy/internal/logger"
 	"movistar-webdav-proxy/internal/rcloneconf"
 	"movistar-webdav-proxy/internal/rclonesvc"
+	"movistar-webdav-proxy/internal/sapi"
 	"movistar-webdav-proxy/internal/vault"
 	"movistar-webdav-proxy/internal/webdav"
 )
@@ -62,6 +65,7 @@ func refreshFolderNames() {
 			folderNames.Store(f.Name, n)
 		}
 		if ch, err := rcloneconf.Remap(f.Config, f.Top, "nube:"+f.Name, ""); err == nil {
+			ch.CapChunkSize(autochunk.Chunk(), rcloneconf.ParseSize) // igual que el rclone interno
 			if sz := newUploadSizer(ch); sz != nil {
 				folderSizers.Store(f.Name, sz)
 			}
@@ -101,10 +105,51 @@ func setupCrypt(webdavPort, rawPort string) *rclonesvc.Service {
 		MountCache:  strings.TrimSpace(os.Getenv("WEBDAV_MOUNT_CACHE_DIR")),
 		OnRestart:   refreshFolderNames,
 	})
+	setupAutoChunk(svc)
 	if len(vault.Folders()) > 0 {
 		svc.Restart()
 	}
 	return svc
+}
+
+// setupAutoChunk baja solo el tamaño de trozo cuando Movistar rechaza subidas por
+// tamaño (MED-1048) y recarga el rclone interno con el nuevo (sin cortar más de una
+// vez por minuto: las subidas en curso se cortan y el cliente las reintenta).
+func setupAutoChunk(svc *rclonesvc.Service) {
+	autochunk.Load()
+	if c := autochunk.Chunk(); c > 0 {
+		logger.Log("[Descifrado] ✂️ Trozos de %d MiB (rebajado automáticamente: Movistar rechaza subidas más grandes)", c>>20)
+	}
+	var mu sync.Mutex
+	var pending bool
+	autochunk.OnChange(func() {
+		c := autochunk.Chunk()
+		if c > 0 {
+			logger.Log("[Descifrado] ✂️ Movistar rechaza las subidas grandes (MED-1048): trozos de %d MiB a partir de ahora", c>>20)
+		} else {
+			logger.Log("[Descifrado] ✂️ Tamaño de trozo restablecido al de la configuración")
+		}
+		mu.Lock()
+		if pending {
+			mu.Unlock()
+			return
+		}
+		pending = true
+		mu.Unlock()
+		go func() {
+			time.Sleep(time.Minute) // agrupa los rechazos de las subidas que van en paralelo
+			mu.Lock()
+			pending = false
+			mu.Unlock()
+			svc.Restart()
+		}()
+	})
+	sapi.UploadRejected = func(size int64) {
+		if size > 0 {
+			autochunk.Rejected(size, autochunk.Chunk())
+		}
+	}
+	sapi.UploadAccepted = autochunk.Accepted
 }
 
 // cloudFolderLister lista, con sus nombres en claro, las carpetas que hay dentro de
