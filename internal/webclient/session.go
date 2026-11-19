@@ -130,6 +130,20 @@ func (s *Session) start() error {
 		chromedp.Flag("disable-blink-features", "AutomationControlled"),
 		chromedp.Flag("disable-dev-shm-usage", true),
 		chromedp.WindowSize(1280, 900),
+		// Menos memoria y procesos (p. ej. en una Raspberry Pi): sin GPU, extensiones
+		// ni servicios de Chrome en segundo plano, y como mucho 2 procesos de pestaña.
+		// Son las opciones por defecto de chromedp; la web y sus cookies no cambian.
+		chromedp.DisableGPU,
+		chromedp.Flag("disable-extensions", true),
+		chromedp.Flag("disable-background-networking", true),
+		chromedp.Flag("disable-component-update", true),
+		chromedp.Flag("disable-default-apps", true),
+		chromedp.Flag("disable-sync", true),
+		chromedp.Flag("disable-features", "Translate,MediaRouter,OptimizationHints"),
+		chromedp.Flag("renderer-process-limit", "2"),
+		chromedp.Flag("mute-audio", true),
+		// Su caché va a /tmp, que en Docker es RAM (tmpfs): como mucho 32 MB.
+		chromedp.Flag("disk-cache-size", "33554432"),
 	}
 	if goruntime.GOOS == "linux" {
 		// Misma clave de cifrado de cookies en todos los arranques (sin llavero en el servidor).
