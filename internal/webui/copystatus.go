@@ -332,9 +332,8 @@ func readCopyStatusWith(dir, controlDir string, reads *readTracker) copyStatus {
 	copyUploads := 0
 	// Las subidas del montaje (cola de su caché) ya las cuenta el proxy: fuera de las lecturas.
 	separateMountUploads(dir, &st)
-	if reads != nil {
-		st.Reading = reads.merge(st.Reading, time.Now())
-	}
+	// Solo lo que se está leyendo: las lecturas paradas (el reproductor tira de su
+	// búfer) no se muestran.
 	st.Folders = buildFolders(dir, st, copyUploads)
 	fillFromProxy(&st)
 	return st

@@ -747,13 +747,11 @@ func (r *responseInterceptor) flush() {
 	if strings.Contains(rawXML, "<D:multistatus") || strings.Contains(rawXML, "<d:multistatus") {
 		space := r.fs.GetStorageSpace()
 		usedBytes := space.UsedBytes
-		var availBytes int64 = 10 * 1024 * 1024 * 1024 * 1024 // 10 TB virtual para cuentas Unlimited
+		// Cuentas ilimitadas: siempre 10 TiB libres virtuales (no se resta lo usado,
+		// que puede superar esa cifra).
+		var availBytes int64 = 10 * 1024 * 1024 * 1024 * 1024
 		if !space.NoLimit && space.FreeBytes > 0 {
 			availBytes = space.FreeBytes
-		} else if space.NoLimit {
-			if availBytes > usedBytes {
-				availBytes -= usedBytes
-			}
 		}
 
 		prefix := "D"
