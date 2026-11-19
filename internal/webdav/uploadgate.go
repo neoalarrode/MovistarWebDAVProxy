@@ -103,10 +103,11 @@ func (g *uploadGate) release() {
 // queueRAMBudget es la RAM total que pueden ocupar los cuerpos de subida en memoria
 // (búfer inicial, archivos pequeños y cola). Es dinámico: la mitad de la memoria
 // disponible de la máquina (MemAvailable) por encima de una reserva de 1 GiB, más
-// lo que ya ocupan; se recalcula como mucho cada 2 s. WEBDAV_QUEUE_RAM_MB, si se
-// define, es el máximo. Lo que no cabe va a disco y, sin sitio, el cliente espera.
+// lo que ya ocupan; se recalcula como mucho cada 2 s. El máximo es
+// WEBDAV_QUEUE_RAM_MB o, por defecto, solo lo de las subidas en curso (huecos ×
+// búfer inicial): sin cola en memoria, el cliente espera (velocidad 0).
 func queueRAMBudget() int64 {
-	limit := int64(-1)
+	limit := int64(uploads.capacityNow()) * int64(GetUploadRAMBufferMaxBytes())
 	if v, err := strconv.Atoi(strings.TrimSpace(os.Getenv("WEBDAV_QUEUE_RAM_MB"))); err == nil && v >= 0 {
 		limit = int64(v) << 20
 	}
@@ -203,14 +204,14 @@ func (g *uploadGate) capacityNow() int {
 }
 
 // queueDiskBudget es el disco total que pueden ocupar las subidas en cola
-// (WEBDAV_QUEUE_DISK_MB, 8192 MB por defecto). Con la RAM y el disco de la cola
-// llenos, el proxy deja de leer del cliente (le llega velocidad 0) hasta que haya
-// sitio o hueco de subida.
+// (WEBDAV_QUEUE_DISK_MB; 0 por defecto: sin caché en disco). Con la RAM y el disco
+// de la cola llenos, el proxy deja de leer del cliente (le llega velocidad 0) hasta
+// que haya hueco de subida.
 func queueDiskBudget() int64 {
 	if v, err := strconv.Atoi(strings.TrimSpace(os.Getenv("WEBDAV_QUEUE_DISK_MB"))); err == nil && v >= 0 {
 		return int64(v) << 20
 	}
-	return 8192 << 20
+	return 0
 }
 
 var queuedDisk atomic.Int64

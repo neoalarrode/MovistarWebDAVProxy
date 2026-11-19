@@ -15,6 +15,7 @@ import (
 	"os"
 	"path"
 	"path/filepath"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -133,8 +134,11 @@ func GetUploadRAMBufferMaxBytes() int {
 // completa en un temporal (RAM o disco) para reintentarlas sin el cliente. Con
 // WEBDAV_UPLOAD_SPOOL=false no se guarda: cada subida ocupa solo el búfer del flujo
 // y, si falla, el PUT responde 503 y el cliente la repite.
+// uploadSpoolEnabled: copia local de cada subida antes de mandarla a la nube. Por
+// defecto NO: subida directa, con el cliente limitado a la velocidad de subida
+// (WEBDAV_UPLOAD_SPOOL=true para activarla).
 func uploadSpoolEnabled() bool {
-	return !strings.EqualFold(strings.TrimSpace(os.Getenv("WEBDAV_UPLOAD_SPOOL")), "false")
+	return strings.EqualFold(strings.TrimSpace(os.Getenv("WEBDAV_UPLOAD_SPOOL")), "true")
 }
 
 func getUploadTempDir() string {
@@ -317,6 +321,7 @@ type MovistarFS struct {
 	client            *sapi.Client
 	metaStore         *cache.MetadataStore
 	uploadCache       map[string]*MemoryFile
+	lastCacheSweep    time.Time // última limpieza de uploadCache (trimSmallFileCacheLocked)
 	createdFolders    map[string]*CreatedFolder
 	deletedTombstones map[string]time.Time
 	folderCache       map[int64]*cachedFolders
@@ -3062,11 +3067,7 @@ func (r *WebDAVFileReader) Read(p []byte) (n int, err error) {
 						URL:      r.item.URL,
 					}
 				}
-				for pth, mem := range r.mfs.uploadCache {
-					if now.Sub(mem.CachedAt) > 15*time.Minute {
-						delete(r.mfs.uploadCache, pth)
-					}
-				}
+				r.mfs.trimSmallFileCacheLocked(now)
 				r.mfs.cacheMu.Unlock()
 			}
 		}
@@ -3555,3 +3556,54 @@ var (
 	_ webdav.FileSystem   = (*MovistarFS)(nil)
 	_ webdav.ContentTyper = (*VirtualFileInfo)(nil)
 )
+
+// smallFileCacheBudget es el tope de memoria del contenido de archivos pequeños que
+// se guarda tras leerlos (WEBDAV_SMALLFILE_CACHE_MB, por defecto 32 MB): sin tope, un
+// escaneo de Emby (miles de subtítulos y .nfo en 15 min) acumulaba cientos de MB.
+func smallFileCacheBudget() int64 {
+	if v, err := strconv.Atoi(strings.TrimSpace(os.Getenv("WEBDAV_SMALLFILE_CACHE_MB"))); err == nil && v >= 0 {
+		return int64(v) << 20
+	}
+	return 32 << 20
+}
+
+// trimSmallFileCacheLocked quita lo caducado (15 min) como mucho cada 30 s y, si el
+// contenido guardado pasa del tope, descarta el de lo más antiguo (se volverá a
+// descargar si hace falta). Con cacheMu tomado.
+func (mfs *MovistarFS) trimSmallFileCacheLocked(now time.Time) {
+	var total int64
+	sweep := now.Sub(mfs.lastCacheSweep) > 30*time.Second
+	if sweep {
+		mfs.lastCacheSweep = now
+	}
+	for pth, mem := range mfs.uploadCache {
+		if sweep && now.Sub(mem.CachedAt) > 15*time.Minute {
+			delete(mfs.uploadCache, pth)
+			continue
+		}
+		total += int64(len(mem.Content))
+	}
+	budget := smallFileCacheBudget()
+	if total <= budget {
+		return
+	}
+	type entry struct {
+		mem *MemoryFile
+		at  time.Time
+	}
+	var withContent []entry
+	for _, mem := range mfs.uploadCache {
+		// Solo lo que ya está en la nube (con ID): se puede volver a descargar.
+		if len(mem.Content) > 0 && mem.ID != "" && !strings.HasPrefix(mem.ID, "virtual:") {
+			withContent = append(withContent, entry{mem, mem.CachedAt})
+		}
+	}
+	sort.Slice(withContent, func(i, j int) bool { return withContent[i].at.Before(withContent[j].at) })
+	for _, e := range withContent {
+		if total <= budget {
+			break
+		}
+		total -= int64(len(e.mem.Content))
+		e.mem.Content = nil
+	}
+}

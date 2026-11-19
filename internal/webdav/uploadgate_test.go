@@ -1,6 +1,7 @@
 package webdav
 
 import (
+	"fmt"
 	"bytes"
 	"io"
 	"net/http"
@@ -145,5 +146,31 @@ func TestAnyQuotaRegex(t *testing.T) {
 	in := `<D:prop><D:quota-available-bytes>1125899906842624</D:quota-available-bytes><D:quota-used-bytes>0</D:quota-used-bytes></D:prop>`
 	if out := anyQuotaRegex.ReplaceAllString(in, ""); out != "<D:prop></D:prop>" {
 		t.Fatalf("quedó: %s", out)
+	}
+}
+
+// La caché de archivos pequeños leídos tiene tope: se descarta el contenido de lo
+// más antiguo que ya está en la nube, nunca el de lo que aún no tiene ID.
+func TestTrimSmallFileCache(t *testing.T) {
+	t.Setenv("WEBDAV_SMALLFILE_CACHE_MB", "1")
+	mfs := &MovistarFS{uploadCache: map[string]*MemoryFile{}}
+	now := time.Now()
+	for i := 0; i < 4; i++ {
+		mfs.uploadCache[fmt.Sprintf("/a%d", i)] = &MemoryFile{ID: fmt.Sprintf("%d", i), Content: make([]byte, 400<<10), Size: 400 << 10, CachedAt: now.Add(time.Duration(i) * time.Second)}
+	}
+	mfs.uploadCache["/pendiente"] = &MemoryFile{Content: make([]byte, 400<<10), Size: 400 << 10, CachedAt: now.Add(-time.Minute)}
+	mfs.trimSmallFileCacheLocked(now.Add(10 * time.Second))
+	var total int64
+	for _, m := range mfs.uploadCache {
+		total += int64(len(m.Content))
+	}
+	if total > 1<<20+400<<10 { // el pendiente no cuenta para descartar
+		t.Fatalf("no respetó el tope: %d", total)
+	}
+	if len(mfs.uploadCache["/pendiente"].Content) == 0 {
+		t.Fatal("no se puede descartar lo que aún no está en la nube")
+	}
+	if len(mfs.uploadCache["/a3"].Content) == 0 {
+		t.Fatal("debía conservar lo más reciente")
 	}
 }

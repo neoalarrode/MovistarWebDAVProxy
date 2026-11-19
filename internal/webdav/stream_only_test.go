@@ -105,15 +105,16 @@ func TestStreamOnly_FailureIs503(t *testing.T) {
 	}
 }
 
-// Por defecto (con copia local) el comportamiento no cambia: el 408 se reintenta
-// desde el temporal.
-func TestStreamOnly_DefaultKeepsSpool(t *testing.T) {
-	if !uploadSpoolEnabled() {
-		t.Fatal("la copia local debe estar activada por defecto")
-	}
-	t.Setenv("WEBDAV_UPLOAD_SPOOL", "FALSE")
+// Por defecto, subida directa sin copia local (el cliente va a la velocidad de
+// subida); WEBDAV_UPLOAD_SPOOL=true la activa.
+func TestStreamOnly_DefaultIsDirect(t *testing.T) {
+	t.Setenv("WEBDAV_UPLOAD_SPOOL", "")
 	if uploadSpoolEnabled() {
-		t.Fatal("WEBDAV_UPLOAD_SPOOL=FALSE debe desactivarla")
+		t.Fatal("por defecto no debe haber copia local")
+	}
+	t.Setenv("WEBDAV_UPLOAD_SPOOL", "TRUE")
+	if !uploadSpoolEnabled() {
+		t.Fatal("WEBDAV_UPLOAD_SPOOL=TRUE debe activarla")
 	}
 }
 

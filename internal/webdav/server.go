@@ -185,7 +185,6 @@ func (s *Server) shouldOfferNTLM(r *http.Request) bool {
 	return isWindowsClient(r) || config.IsNTLMHeader(r.Header.Get("Authorization"))
 }
 
-
 func (s *Server) InvalidateCache() {
 	if s.fs != nil {
 		s.fs.InvalidateCache(0)
