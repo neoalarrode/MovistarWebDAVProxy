@@ -2291,8 +2291,14 @@ func (c *Client) UploadFileToFolder(fileName string, reader io.Reader, size int6
 		// Content-Length lee el principio y se queda callado (subida colgada; medido
 		// el 19/11/2026), y no hay forma de detectar el límite.
 		body, length, ctype, closeBody := uploadBody(metaBytes, fileName, reader, -1)
-		req, err := http.NewRequest("POST", uploadEndpoint, body)
+		// Si Movistar deja de leer la subida (se queda callado), se corta a los
+		// uploadStallTimeout y cuenta como rechazo por tamaño.
+		ctx, cancel := context.WithCancel(context.Background())
+		watched := newStallReader(body, uploadStallTimeout, cancel)
+		req, err := http.NewRequestWithContext(ctx, "POST", uploadEndpoint, watched)
 		if err != nil {
+			watched.stop()
+			cancel()
 			closeBody()
 			return nil, err
 		}
@@ -2302,13 +2308,27 @@ func (c *Client) UploadFileToFolder(fileName string, reader io.Reader, size int6
 		req.Header.Set("Content-Type", ctype)
 
 		resp, err := c.DoRequest(req)
+		stalled := watched.stop()
 		closeBody()
+		if stalled {
+			cancel()
+			logger.Log("[SAPI] ⚠️ Movistar dejó de leer la subida de '%s' (%.2f MB) durante %s: se corta y cuenta como rechazo por tamaño.", fileName, float64(size)/(1024*1024), uploadStallTimeout)
+			if UploadRejected != nil && size > 0 {
+				UploadRejected(size)
+			}
+			if resp != nil {
+				_ = resp.Body.Close()
+			}
+			return nil, fmt.Errorf("upload stalled: Movistar dejó de leer durante %s", uploadStallTimeout)
+		}
 		if err != nil {
+			cancel()
 			return nil, err
 		}
 
 		b, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
 		_ = resp.Body.Close()
+		cancel()
 		bStr := string(b)
 
 		// MED-1017 check: Media is being validated asynchronously (~4-10s)
@@ -2785,4 +2805,71 @@ func uploadBody(metaBytes []byte, fileName string, reader io.Reader, size int64)
 		}
 	}()
 	return pr, -1, mpw.FormDataContentType(), func() { _ = pr.Close() }
+}
+
+// uploadStallTimeout es cuánto puede pasar Movistar sin leer una subida antes de
+// cortarla (con datos listos para enviar: si es el cliente el que no manda, no cuenta).
+var uploadStallTimeout = 60 * time.Second
+
+// stallReader vigila que quien lee el cuerpo (la conexión con Movistar) siga
+// leyendo. Si pasa timeout sin pedir más datos y no hay ninguna lectura esperando al
+// origen, llama a onStall (cancela la petición).
+type stallReader struct {
+	r       io.Reader
+	mu      sync.Mutex
+	last    time.Time
+	reading bool
+	ended   bool // cuerpo enviado entero: lo que tarde la respuesta no cuenta
+	stalled bool
+	done    chan struct{}
+	once    sync.Once
+}
+
+func newStallReader(r io.Reader, timeout time.Duration, onStall func()) *stallReader {
+	s := &stallReader{r: r, last: time.Now(), done: make(chan struct{})}
+	go func() {
+		t := time.NewTicker(timeout / 6)
+		defer t.Stop()
+		for {
+			select {
+			case <-s.done:
+				return
+			case <-t.C:
+				s.mu.Lock()
+				idle := !s.reading && !s.ended && time.Since(s.last) > timeout
+				if idle {
+					s.stalled = true
+				}
+				s.mu.Unlock()
+				if idle {
+					onStall()
+					return
+				}
+			}
+		}
+	}()
+	return s
+}
+
+func (s *stallReader) Read(p []byte) (int, error) {
+	s.mu.Lock()
+	s.reading = true
+	s.mu.Unlock()
+	n, err := s.r.Read(p)
+	s.mu.Lock()
+	s.reading = false
+	s.last = time.Now()
+	if err != nil {
+		s.ended = true
+	}
+	s.mu.Unlock()
+	return n, err
+}
+
+// stop termina la vigilancia y dice si la subida se cortó por quedarse parada.
+func (s *stallReader) stop() bool {
+	s.once.Do(func() { close(s.done) })
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.stalled
 }
