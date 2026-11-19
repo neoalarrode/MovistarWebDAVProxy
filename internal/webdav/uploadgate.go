@@ -102,8 +102,8 @@ func (g *uploadGate) release() {
 
 // queueRAMBudget es la RAM total que pueden ocupar los cuerpos de subida en memoria
 // (búfer inicial, archivos pequeños y cola). Es dinámico: la mitad de la memoria
-// disponible de la máquina (MemAvailable) por encima de una reserva de 1 GiB, más
-// lo que ya ocupan; se recalcula como mucho cada 2 s. El máximo es
+// disponible de la máquina (MemAvailable) por encima de una reserva para el sistema
+// (1/8 de la RAM, entre 256 MB y 1 GiB), más lo que ya ocupan; se recalcula como mucho cada 2 s. El máximo es
 // WEBDAV_QUEUE_RAM_MB o, por defecto, solo lo de las subidas en curso (huecos ×
 // búfer inicial): sin cola en memoria, el cliente espera (velocidad 0).
 func queueRAMBudget() int64 {

@@ -2609,16 +2609,13 @@ func (w *WebDAVFileWriter) Write(p []byte) (n int, err error) {
 			w.slotHeld = true
 			w.startStreamUpload(initialBytes)
 		} else {
-			// Sin hueco libre: se encola. El cuerpo se guarda en RAM mientras quepa en
-			// el presupuesto de la cola y, si no, en disco; se sube al tener hueco.
+			// Sin hueco libre: se encola. Lo recibido sigue en RAM con la reserva que ya
+			// tiene (cada escritura la reservó al llegar; reservarla otra vez la contaba
+			// dos veces y no se liberaba nunca); lo que llegue después va a RAM o disco
+			// según el presupuesto, o el cliente espera.
 			w.queued = true
 			w.queuedMark = startUploadMark("queued", w.path, w.guard.expected)
-			if reserveQueueRAM(int64(w.buf.Len())) {
-				w.queueRAM = int64(w.buf.Len())
-			} else if err := w.spoolToDisk(); err != nil {
-				return 0, err
-			}
-			logger.Log("[WebDAV] ⏳ Sin hueco de subida libre: '%s' queda en cola (%s)", w.name, map[bool]string{true: "RAM", false: "disco"}[w.tmpFile == nil])
+			logger.Log("[WebDAV] ⏳ Sin hueco de subida libre: '%s' queda en cola", w.name)
 		}
 	}
 	if w.queued {

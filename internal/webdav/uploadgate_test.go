@@ -182,3 +182,59 @@ func TestQueueRAMBudget_FloorOneBuffer(t *testing.T) {
 		t.Fatalf("presupuesto %d < un búfer %d", got, want)
 	}
 }
+
+// Con escrituras pequeñas antes de encolarse (lo normal por SMB o el montaje), la
+// reserva de RAM del búfer no se cuenta dos veces: al terminar queda en cero.
+func TestQueuedUpload_NoRAMLeakWithSmallWrites(t *testing.T) {
+	t.Setenv("WEBDAV_UPLOAD_SPOOL", "false")
+	t.Setenv("WEBDAV_BUFFER_MB", "1")
+	t.Setenv("WEBDAV_QUEUE_RAM_MB", "64")
+	oldCap := uploads.capacityNow()
+	uploadGateSet(1)
+	t.Cleanup(func() { uploadGateSet(oldCap) })
+	start := queuedRAM.Load()
+
+	mock := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		if r.URL.Path == "/sapi/upload" {
+			_, _ = io.Copy(io.Discard, r.Body)
+			_, _ = io.WriteString(w, `{"data":{"id":"778","name":"u.bin"}}`)
+			return
+		}
+		_, _ = io.WriteString(w, `{"data":{"folders":[{"id":100,"name":"Root","parentid":0,"magic":true}]}}`)
+	}))
+	t.Cleanup(mock.Close)
+	client, err := sapi.NewClient(config.AccountConfig{Provider: "movistar", Phone: "612345678", AccessToken: "a", RefreshToken: "r", ValidationKey: "vk"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	client.SetBaseURLs(mock.URL+"/sapi", mock.URL)
+	mfs := NewMovistarFS(client)
+
+	if !uploads.tryAcquire(false) {
+		t.Fatal("no se pudo ocupar el hueco")
+	}
+	w := NewWebDAVFileWriter(mfs, "/u.bin", "u.bin", 100, "")
+	w.guard = &uploadGuard{expected: 3 << 20}
+	for i := 0; i < 6; i++ { // 6 × 128 KB en RAM antes de pasar del búfer inicial
+		if _, err := w.Write(make([]byte, 128<<10)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if _, err := w.Write(make([]byte, 1<<20)); err != nil {
+		t.Fatal(err)
+	}
+	if !w.queued {
+		t.Fatal("sin hueco libre la subida debe quedar en cola")
+	}
+	uploads.release()
+	if _, err := w.Write(make([]byte, 3<<20-6*(128<<10)-(1<<20))); err != nil {
+		t.Fatal(err)
+	}
+	if err := w.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+	if got := queuedRAM.Load() - start; got != 0 {
+		t.Fatalf("la RAM de la cola debe quedar liberada; quedan %d bytes reservados", got)
+	}
+}
