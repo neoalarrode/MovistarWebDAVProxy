@@ -1576,6 +1576,28 @@ func (c *Client) GetMediaByID(mediaID string) (*MediaItem, error) {
 	return nil, nil
 }
 
+// RenewDownloadURLs pide las URL de descarga de varios archivos de una vez (de 50
+// en 50, como la web) y las recuerda como recién pedidas.
+func (c *Client) RenewDownloadURLs(ids []string) error {
+	for len(ids) > 0 {
+		n := len(ids)
+		if n > 50 {
+			n = 50
+		}
+		items, err := c.getMediaByIDs(ids[:n])
+		if err != nil {
+			return err
+		}
+		for _, it := range items {
+			if it.ID != "" && it.URL != "" {
+				c.storeFreshURL(it.ID, it.URL)
+			}
+		}
+		ids = ids[n:]
+	}
+	return nil
+}
+
 // getMediaByIDs consulta varios archivos en una sola llamada (la web pide así las
 // URL de descarga).
 func (c *Client) getMediaByIDs(ids []string) ([]MediaItem, error) {

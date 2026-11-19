@@ -1560,6 +1560,21 @@ func (mfs *MovistarFS) OpenFile(ctx context.Context, name string, flag int, perm
 		}), nil
 	}
 
+	// Archivos diminutos (fichas del chunker...) ya leídos alguna vez: desde la base
+	// local, sin pedirlos a la nube (un listado en frío los lee todos).
+	if ms := mfs.MetadataStore(); ms != nil {
+		if b, ok := ms.GetTinyContent(mediaInfo.ID, mediaInfo.ETag, mediaInfo.Size); ok {
+			return NewWebDAVMemoryReader(cleanPath, &MemoryFile{
+				ID:       mediaInfo.ID,
+				Name:     mediaInfo.Name,
+				FolderID: mediaInfo.FolderID,
+				Content:  b,
+				Size:     mediaInfo.Size,
+				ModTime:  parseTime(mediaInfo.ModificationDate),
+				CachedAt: time.Now(),
+			}), nil
+		}
+	}
 	return NewWebDAVFileReader(mfs, cleanPath, *mediaInfo), nil
 }
 
@@ -3052,6 +3067,9 @@ func (r *WebDAVFileReader) Read(p []byte) (n int, err error) {
 			if r.pos == r.item.Size && int64(r.cacheBuf.Len()) == r.item.Size {
 				data := append([]byte(nil), r.cacheBuf.Bytes()...)
 				r.cacheBuf = nil
+				if ms := r.mfs.MetadataStore(); ms != nil && len(data) <= cache.TinyContentMax {
+					ms.PutTinyContent(r.item.ID, r.item.ETag, data)
+				}
 				now := time.Now()
 				r.mfs.cacheMu.Lock()
 				lowerRPath := strings.ToLower(r.path)
@@ -3605,5 +3623,71 @@ func (mfs *MovistarFS) trimSmallFileCacheLocked(now time.Time) {
 		}
 		total -= int64(len(e.mem.Content))
 		e.mem.Content = nil
+	}
+}
+
+// PrefillTinyContent guarda en segundo plano, una sola vez, el contenido de los
+// archivos diminutos (fichas del chunker...) que aún no se tienen: así un listado en
+// frío (tras reiniciar el montaje) no los descarga uno a uno. URL de 50 en 50 y dos
+// descargas a la vez, para no competir con subidas ni reproducciones.
+func (mfs *MovistarFS) PrefillTinyContent(ctx context.Context) {
+	ms := mfs.MetadataStore()
+	if ms == nil || mfs.client == nil {
+		return
+	}
+	total := 0
+	for ctx.Err() == nil {
+		items, err := ms.ListTinyMissing(200)
+		if err != nil || len(items) == 0 {
+			break
+		}
+		ids := make([]string, 0, len(items))
+		for _, it := range items {
+			ids = append(ids, it.ID)
+		}
+		if err := mfs.client.RenewDownloadURLs(ids); err != nil {
+			logger.Log("[WebDAV] ⚠️ Relleno de archivos diminutos interrumpido: %v", err)
+			return
+		}
+		jobs := make(chan sapi.MediaItem)
+		var wg sync.WaitGroup
+		var failed atomic.Int64
+		for w := 0; w < 2; w++ {
+			wg.Add(1)
+			go func() {
+				defer wg.Done()
+				for it := range jobs {
+					rc, err := mfs.client.DownloadFileStream(it)
+					if err != nil {
+						failed.Add(1)
+						continue
+					}
+					b, err := io.ReadAll(io.LimitReader(rc, cache.TinyContentMax+1))
+					_ = rc.Close()
+					if err != nil || int64(len(b)) != it.Size {
+						failed.Add(1)
+						continue
+					}
+					ms.PutTinyContent(it.ID, it.ETag, b)
+				}
+			}()
+		}
+		for _, it := range items {
+			if ctx.Err() != nil {
+				break
+			}
+			jobs <- it
+		}
+		close(jobs)
+		wg.Wait()
+		total += len(items) - int(failed.Load())
+		if int(failed.Load()) == len(items) {
+			// Nada se pudo descargar en esta tanda: no insistir en bucle.
+			logger.Log("[WebDAV] ⚠️ Relleno de archivos diminutos detenido: ninguna descarga de la tanda funcionó")
+			return
+		}
+	}
+	if total > 0 {
+		logger.Log("[WebDAV] 📦 Guardado el contenido de %d archivos diminutos (listados en frío sin descargarlos)", total)
 	}
 }

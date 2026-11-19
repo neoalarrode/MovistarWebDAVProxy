@@ -271,6 +271,23 @@ func main() {
 	uiServer.SetCrypt(cryptSvc)
 	webui.SetCloudFolders(cloudFolderLister(webdavServer))
 	cryptSvc.SetRootLister(rootDirLister(webdavServer))
+	// Contenido de los archivos diminutos (fichas del chunker...), una vez y en segundo
+	// plano cuando la base local esté sincronizada.
+	go func() {
+		for ctx.Err() == nil {
+			if fs := webdavServer.FS(); fs != nil {
+				if ms := fs.MetadataStore(); ms != nil && ms.HasInitialSync() {
+					fs.PrefillTinyContent(ctx)
+					return
+				}
+			}
+			select {
+			case <-ctx.Done():
+				return
+			case <-time.After(30 * time.Second):
+			}
+		}
+	}()
 	if webSess != nil {
 		view := webSess.LoginView()
 		uiServer.SetWebLogin(view.Handler("/web-login/"))
