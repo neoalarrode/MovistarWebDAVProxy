@@ -118,6 +118,11 @@ func queueRAMBudget() int64 {
 	if budget < 0 {
 		budget = 512 << 20 // sin /proc/meminfo (p. ej. macOS): valor fijo
 	}
+	// Siempre cabe al menos el búfer de una subida: si no, con poca memoria libre y
+	// sin cola en disco, ninguna subida podría empezar nunca.
+	if one := int64(GetUploadRAMBufferMaxBytes()); budget < one {
+		budget = one
+	}
 	return budget
 }
 
@@ -125,6 +130,7 @@ var ramProbe struct {
 	sync.Mutex
 	at        time.Time
 	available int64 // bytes; -1 si no se puede leer
+	total     int64 // MemTotal en bytes; -1 si no se puede leer
 }
 
 // dynamicRAMBudget devuelve el presupuesto según la memoria libre, o -1 si no se sabe.
@@ -132,14 +138,27 @@ func dynamicRAMBudget() int64 {
 	ramProbe.Lock()
 	if time.Since(ramProbe.at) > 2*time.Second {
 		ramProbe.available = memAvailable()
+		ramProbe.total = memInfo("MemTotal:")
 		ramProbe.at = time.Now()
 	}
-	avail := ramProbe.available
+	avail, total := ramProbe.available, ramProbe.total
 	ramProbe.Unlock()
 	if avail < 0 {
 		return -1
 	}
-	const reserve = 1 << 30
+	// Reserva para el sistema: 1/8 de la RAM total, entre 256 MB y 1 GiB (512 MB en
+	// una Raspberry Pi de 4 GB). Con 1 GiB fijo, una máquina pequeña se quedaba sin
+	// presupuesto.
+	reserve := int64(1 << 30)
+	if total > 0 {
+		reserve = total / 8
+		if reserve < 256<<20 {
+			reserve = 256 << 20
+		}
+		if reserve > 1<<30 {
+			reserve = 1 << 30
+		}
+	}
 	free := (avail - reserve) / 2
 	if free < 0 {
 		free = 0
@@ -148,13 +167,16 @@ func dynamicRAMBudget() int64 {
 }
 
 // memAvailable lee MemAvailable de /proc/meminfo (bytes), o -1.
-func memAvailable() int64 {
+func memAvailable() int64 { return memInfo("MemAvailable:") }
+
+// memInfo lee un campo de /proc/meminfo (bytes), o -1.
+func memInfo(field string) int64 {
 	b, err := os.ReadFile("/proc/meminfo")
 	if err != nil {
 		return -1
 	}
 	for _, line := range strings.Split(string(b), "\n") {
-		if strings.HasPrefix(line, "MemAvailable:") {
+		if strings.HasPrefix(line, field) {
 			f := strings.Fields(line)
 			if len(f) >= 2 {
 				if kb, err := strconv.ParseInt(f[1], 10, 64); err == nil {

@@ -174,3 +174,11 @@ func TestTrimSmallFileCache(t *testing.T) {
 		t.Fatal("debía conservar lo más reciente")
 	}
 }
+
+// Aunque no haya memoria libre, siempre cabe el búfer de una subida.
+func TestQueueRAMBudget_FloorOneBuffer(t *testing.T) {
+	t.Setenv("WEBDAV_QUEUE_RAM_MB", "0")
+	if got, want := queueRAMBudget(), int64(GetUploadRAMBufferMaxBytes()); got < want {
+		t.Fatalf("presupuesto %d < un búfer %d", got, want)
+	}
+}
