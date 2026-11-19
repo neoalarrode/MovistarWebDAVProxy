@@ -159,8 +159,18 @@ func NamesFor(f Folder) *cryptname.Cipher {
 	if cs == nil || (cs.Get("filename_encryption") != "" && cs.Get("filename_encryption") != "standard") {
 		return nil
 	}
-	p := revealIfObscured(cs.Get("password"))
-	p2 := revealIfObscured(cs.Get("password2"))
+	// En rclone.conf las contraseñas van siempre ofuscadas y rclone las revela sin
+	// más: igual aquí (adivinar si están ofuscadas podía dar otra clave).
+	p, err := cryptname.Reveal(cs.Get("password"))
+	if err != nil || p == "" {
+		return nil
+	}
+	var p2 string
+	if v := cs.Get("password2"); v != "" {
+		if p2, err = cryptname.Reveal(v); err != nil {
+			return nil
+		}
+	}
 	n, err := cryptname.New(p, p2)
 	if err != nil {
 		return nil
