@@ -13,6 +13,7 @@ import (
 
 	utls "github.com/refraction-networking/utls"
 	"golang.org/x/net/http2"
+	"golang.org/x/sys/cpu"
 )
 
 // clientHelloIDFromEnv resuelve la huella TLS (ClientHelloID) que debe imitar el
@@ -77,10 +78,20 @@ func dialTLSContextWithUTLSALPN(ctx context.Context, network, addr string, nextP
 	}
 
 	helloID := clientHelloIDFromEnv()
-	uConn := utls.UClient(plainConn, &utls.Config{
-		ServerName: host,
-		NextProtos: nextProtos,
-	}, helloID)
+	var uConn *utls.UConn
+	if spec, ok := chachaFirstSpec(helloID); ok {
+		// Sin AES por hardware: el mismo perfil, con ChaCha20 delante (ver preferChaCha).
+		uConn = utls.UClient(plainConn, &utls.Config{ServerName: host, NextProtos: nextProtos}, utls.HelloCustom)
+		if err := uConn.ApplyPreset(&spec); err != nil {
+			_ = plainConn.Close()
+			return nil, fmt.Errorf("utls preset %s: %w", helloID.Str(), err)
+		}
+	} else {
+		uConn = utls.UClient(plainConn, &utls.Config{
+			ServerName: host,
+			NextProtos: nextProtos,
+		}, helloID)
+	}
 
 	if err := uConn.HandshakeContext(ctx); err != nil {
 		_ = plainConn.Close()
@@ -115,7 +126,72 @@ func http1OnlySpec(helloID utls.ClientHelloID) (utls.ClientHelloSpec, error) {
 			alpn.AlpnProtocols = []string{"http/1.1"}
 		}
 	}
+	if preferChaCha() {
+		spec.CipherSuites = chachaFirst(spec.CipherSuites)
+	}
 	return spec, nil
+}
+
+// preferChaCha indica si usar ChaCha20-Poly1305 en vez de AES-GCM (ver chachaFirst). Chrome (BoringSSL)
+// lo hace en procesadores sin AES por hardware, como el de la Raspberry Pi 4: ahí AES
+// va por software y es ~5 veces más lento que ChaCha20 (medido en la Pi 4: 69 frente a
+// 322 MB/s por núcleo), y con AES el cifrado de la conexión con Movistar se comía la
+// CPU. TLS_PREFER_CHACHA=true/false lo fuerza; por defecto, según el procesador.
+func preferChaCha() bool {
+	switch strings.ToLower(strings.TrimSpace(os.Getenv("TLS_PREFER_CHACHA"))) {
+	case "true", "1", "yes", "si", "sí":
+		return true
+	case "false", "0", "no":
+		return false
+	}
+	return !hasAESHardware()
+}
+
+func hasAESHardware() bool {
+	return cpu.ARM64.HasAES || cpu.X86.HasAES || cpu.S390X.HasAES
+}
+
+// chachaFirst devuelve los cifrados con los ChaCha20 delante (tras el GREASE inicial,
+// si lo hay) y sin los AES-GCM de TLS 1.3: aunque ChaCha20 vaya primero, CloudFront
+// elige AES si se le ofrece (preferencia del servidor), y Movistar negocia TLS 1.3. Con
+// solo ChaCha20 en TLS 1.3 responde igual (comprobado el 20/11/2026: portada 200, API
+// sin sesión 401, descarga 200, sin 403 de bot). Los de TLS 1.2 se quedan en su orden.
+func chachaFirst(suites []uint16) []uint16 {
+	isChaCha := func(c uint16) bool {
+		return c == utls.TLS_CHACHA20_POLY1305_SHA256 ||
+			c == utls.TLS_ECDHE_ECDSA_WITH_CHACHA20_POLY1305 ||
+			c == utls.TLS_ECDHE_RSA_WITH_CHACHA20_POLY1305
+	}
+	out := make([]uint16, 0, len(suites))
+	i := 0
+	for ; i < len(suites) && suites[i]&0x0f0f == 0x0a0a; i++ { // GREASE
+		out = append(out, suites[i])
+	}
+	for _, c := range suites[i:] {
+		if isChaCha(c) {
+			out = append(out, c)
+		}
+	}
+	for _, c := range suites[i:] {
+		if !isChaCha(c) && c != utls.TLS_AES_128_GCM_SHA256 && c != utls.TLS_AES_256_GCM_SHA384 {
+			out = append(out, c)
+		}
+	}
+	return out
+}
+
+// chachaFirstSpec devuelve el ClientHello del perfil con ChaCha20 delante, si toca
+// (preferChaCha) y el perfil tiene especificación fija.
+func chachaFirstSpec(helloID utls.ClientHelloID) (utls.ClientHelloSpec, bool) {
+	if !preferChaCha() {
+		return utls.ClientHelloSpec{}, false
+	}
+	spec, err := utls.UTLSIdToSpec(helloID)
+	if err != nil {
+		return spec, false
+	}
+	spec.CipherSuites = chachaFirst(spec.CipherSuites)
+	return spec, true
 }
 
 func dialTLSContextHTTP1Only(ctx context.Context, network, addr string) (net.Conn, error) {
