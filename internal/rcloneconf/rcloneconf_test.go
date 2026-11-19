@@ -61,3 +61,11 @@ func TestRemap_ErrorsAreClear(t *testing.T) {
 		t.Error("remoto inexistente debe fallar")
 	}
 }
+
+// Solo se admiten tipos que transforman lo que va a la nube.
+func TestRemap_RejectsLocalTypes(t *testing.T) {
+	conf := "[c]\ntype = cache\nremote = nube:\nchunk_path = /app/tokens\n"
+	if _, err := Remap(conf, "c", "nube:emby", ""); err == nil || !strings.Contains(err.Error(), "cache") {
+		t.Fatalf("debía rechazar el tipo cache: %v", err)
+	}
+}

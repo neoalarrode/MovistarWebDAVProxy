@@ -91,3 +91,13 @@ func TestWriteConfig_AutoChunkCap(t *testing.T) {
 		t.Fatalf("esperado trozo de 95 MiB:\n%s", b)
 	}
 }
+
+// El rclone interno no hereda variables RCLONE_* (rclone las toma como opciones).
+func TestRcloneEnv_DropsRcloneVars(t *testing.T) {
+	t.Setenv("RCLONE_CRYPT_PASSWORD2", "sal-equivocada")
+	t.Setenv("OTRA", "1")
+	env := strings.Join(rcloneEnv("/tmp/r.conf"), "\\n")
+	if strings.Contains(env, "RCLONE_CRYPT_PASSWORD2") || !strings.Contains(env, "OTRA=1") || !strings.Contains(env, "RCLONE_CONFIG=/tmp/r.conf") {
+		t.Fatalf("entorno: %s", env)
+	}
+}

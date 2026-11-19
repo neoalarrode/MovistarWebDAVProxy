@@ -74,6 +74,13 @@ func splitRemote(v string) (name, path string, ok bool) {
 	return v[:i], v[i+1:], true
 }
 
+// allowedTypes son los tipos de remoto que se admiten en la cadena de una carpeta:
+// transforman lo que va a la nube. Otros (cache, local, union...) leen o escriben
+// rutas del propio contenedor (claves, sesión) y no tienen sentido aquí.
+var allowedTypes = map[string]bool{"crypt": true, "chunker": true, "compress": true, "hasher": true}
+
+const allowedTypeList = "crypt, chunker, compress y hasher"
+
 // Chain es una cadena de remotos lista para usar sobre una carpeta de la nube.
 type Chain struct {
 	Top      string    // remoto de arriba (ya con prefijo)
@@ -122,6 +129,9 @@ func Remap(text, top, base, prefix string) (*Chain, error) {
 			return nil, fmt.Errorf("la cadena de remotos tiene un bucle en [%s]", cur.Name)
 		}
 		seen[cur.Name] = true
+		if t := cur.Get("type"); !allowedTypes[t] {
+			return nil, fmt.Errorf("[%s] es de tipo %q: solo se admiten %s sobre una carpeta de la nube", cur.Name, t, allowedTypeList)
+		}
 		s := Section{Name: prefix + cur.Name, Keys: append([][2]string(nil), cur.Keys...)}
 		ch.Types = append(ch.Types, cur.Get("type"))
 		next, _, ok := splitRemote(cur.Get("remote"))

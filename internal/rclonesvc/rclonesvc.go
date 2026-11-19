@@ -218,7 +218,9 @@ func (s *Service) topDirs(ctx context.Context, folders []vault.Folder) []string 
 	}
 	cctx, cancel := context.WithTimeout(ctx, 2*time.Minute)
 	defer cancel()
-	out, err := exec.CommandContext(cctx, s.opts.Binary, "lsf", "--dirs-only", "--config", conf, "nube:").Output()
+	lsf := exec.CommandContext(cctx, s.opts.Binary, "lsf", "--dirs-only", "--config", conf, "nube:")
+	lsf.Env = rcloneEnv(conf)
+	out, err := lsf.Output()
 	if err != nil {
 		logger.Log("[Descifrado] ⚠️ No se pudieron listar las carpetas de la raíz: %v", err)
 		return nil
@@ -256,7 +258,7 @@ func (s *Service) supervise(ctx context.Context, folders []vault.Folder) {
 			return
 		}
 		cmd := exec.CommandContext(ctx, s.opts.Binary, s.args(conf)...)
-		cmd.Env = append(os.Environ(), "RCLONE_CONFIG="+conf)
+		cmd.Env = rcloneEnv(conf)
 		out, _ := cmd.StdoutPipe()
 		cmd.Stderr = cmd.Stdout
 		if err := cmd.Start(); err != nil {
@@ -335,7 +337,7 @@ func (s *Service) superviseMount(ctx context.Context, folders []vault.Folder) {
 		// Un montaje anterior colgado (p. ej. tras un reinicio brusco) impide montar.
 		_ = exec.Command("fusermount3", "-uz", s.opts.MountPath).Run()
 		cmd := exec.CommandContext(ctx, s.opts.Binary, s.mountArgs(conf)...)
-		cmd.Env = append(os.Environ(), "RCLONE_CONFIG="+conf)
+		cmd.Env = rcloneEnv(conf)
 		out, _ := cmd.StdoutPipe()
 		cmd.Stderr = cmd.Stdout
 		if err := cmd.Start(); err != nil {
@@ -396,4 +398,18 @@ func (s *Service) WaitReady(ctx context.Context) {
 		}
 		time.Sleep(300 * time.Millisecond)
 	}
+}
+
+// rcloneEnv es el entorno del rclone interno: el del contenedor sin ninguna
+// variable RCLONE_*. rclone toma RCLONE_<TIPO>_<OPCIÓN> como valor por defecto de
+// esa opción (p. ej. RCLONE_CRYPT_PASSWORD2 pondría esa sal a toda carpeta cuya
+// configuración no lleve password2), y el proxy usa variables con esos nombres.
+func rcloneEnv(conf string) []string {
+	var env []string
+	for _, kv := range os.Environ() {
+		if !strings.HasPrefix(strings.ToUpper(kv), "RCLONE_") {
+			env = append(env, kv)
+		}
+	}
+	return append(env, "RCLONE_CONFIG="+conf)
 }
