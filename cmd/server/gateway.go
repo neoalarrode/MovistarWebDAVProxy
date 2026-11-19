@@ -57,6 +57,16 @@ func (g *decryptedGateway) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		flush()
 		return
 	}
+	if r.Method == http.MethodGet {
+		// El panel muestra la lectura como un solo archivo en claro, no trozo a trozo.
+		if raw, ok := rawPathFor(r.URL.Path); ok {
+			defer webdav.CoverUploads(raw)()
+		}
+		tw, done := webdav.TrackPublicDownload(w, path.Clean("/"+r.URL.Path))
+		defer done()
+		g.upstream.ServeHTTP(tw, r)
+		return
+	}
 	if r.Method == http.MethodPut {
 		// El panel muestra la subida desde que llega, con su nombre en claro y su
 		// tamaño, en vez de esperar a que el rclone interno empiece a mandar el trozo

@@ -116,3 +116,28 @@ func TestPublicUpload_ShownOnceFromArrival(t *testing.T) {
 		t.Fatalf("terminada no debe verse: %+v", got)
 	}
 }
+
+// Una lectura por la pasarela se ve como un solo archivo en claro; sus trozos
+// cifrados no aparecen aparte.
+func TestPublicDownload_ShownOnce(t *testing.T) {
+	old := Transfers
+	Transfers = NewTransferTracker(time.Minute)
+	t.Cleanup(func() { Transfers = old })
+	uncover := CoverUploads("emby/abc/def")
+	rec := httptest.NewRecorder()
+	pw, done := TrackPublicDownload(rec, "/emby/Netflix/Serie/E01.mkv")
+	pw.Header().Set("Content-Range", "bytes 0-99/1000")
+	pw.WriteHeader(http.StatusPartialContent)
+	_, _ = pw.Write(make([]byte, 100))
+	raw := &transferWriter{ResponseWriter: httptest.NewRecorder(), path: "/emby/abc/def-chunk001_x1"}
+	raw.Header().Set("Content-Length", "1048")
+	raw.WriteHeader(http.StatusOK)
+	_, _ = raw.Write(make([]byte, 100))
+	got := Transfers.Snapshot()
+	if len(got) != 1 || got[0].Path != "/emby/Netflix/Serie/E01.mkv" || got[0].Size != 1000 {
+		t.Fatalf("debe verse una sola lectura, la del archivo en claro: %+v", got)
+	}
+	raw.done()
+	uncover()
+	done()
+}

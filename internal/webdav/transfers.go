@@ -348,7 +348,11 @@ func (t *transferWriter) WriteHeader(code int) {
 			} else if cl := t.Header().Get("Content-Length"); cl != "" {
 				size, _ = strconv.ParseInt(cl, 10, 64)
 			}
-			t.h = Transfers.Start("download", t.path, size, offset)
+			// Si la lectura llega por la pasarela, ya la muestra ella (archivo en claro
+			// y entero); sus trozos cifrados no se listan aparte.
+			if !uploadCovered(t.path) {
+				t.h = Transfers.Start("download", t.path, size, offset)
+			}
 		}
 	}
 	t.ResponseWriter.WriteHeader(code)
@@ -370,3 +374,11 @@ func (t *transferWriter) Flush() {
 }
 
 func (t *transferWriter) done() { t.h.Done() }
+
+// TrackPublicDownload muestra en el panel una lectura que llega por la pasarela del
+// WebDAV público, con su ruta en claro y el tamaño y la posición que dé la
+// respuesta (Content-Range o Content-Length). Llamar a la función devuelta al terminar.
+func TrackPublicDownload(w http.ResponseWriter, path string) (http.ResponseWriter, func()) {
+	tw := &transferWriter{ResponseWriter: w, path: path}
+	return tw, tw.done
+}
