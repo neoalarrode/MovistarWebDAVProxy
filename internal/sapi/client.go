@@ -2286,52 +2286,19 @@ func (c *Client) UploadFileToFolder(fileName string, reader io.Reader, size int6
 			_, _ = seeker.Seek(0, io.SeekStart)
 		}
 
-		pr, pw := io.Pipe()
-		mpw := multipart.NewWriter(pw)
-
-		go func() {
-			var writeErr error
-			defer func() {
-				if writeErr != nil {
-					_ = pw.CloseWithError(writeErr)
-				} else {
-					_ = mpw.Close()
-					_ = pw.Close()
-				}
-			}()
-
-			// 1. Part: data
-			partData, err := mpw.CreateFormField("data")
-			if err != nil {
-				writeErr = err
-				return
-			}
-			if _, err := partData.Write(metaBytes); err != nil {
-				writeErr = err
-				return
-			}
-
-			// 2. Part: file
-			partFile, err := mpw.CreateFormFile("file", fileName)
-			if err != nil {
-				writeErr = err
-				return
-			}
-			if _, err := io.Copy(partFile, reader); err != nil {
-				writeErr = err
-				return
-			}
-		}()
-
-		req, err := http.NewRequest("POST", uploadEndpoint, pr)
+		body, length, ctype, closeBody := uploadBody(metaBytes, fileName, reader, size)
+		req, err := http.NewRequest("POST", uploadEndpoint, body)
 		if err != nil {
-			_ = pr.Close()
+			closeBody()
 			return nil, err
 		}
-		req.Header.Set("Content-Type", mpw.FormDataContentType())
+		if length >= 0 {
+			req.ContentLength = length
+		}
+		req.Header.Set("Content-Type", ctype)
 
 		resp, err := c.DoRequest(req)
-		_ = pr.Close()
+		closeBody()
 		if err != nil {
 			return nil, err
 		}
@@ -2744,4 +2711,58 @@ func (c *Client) MediaDiagnostics(mediaID string) (map[string]interface{}, error
 		out["validation_status"] = st
 	}
 	return out, nil
+}
+
+// uploadBody arma el formulario de una subida (campo «data» con los metadatos y el
+// archivo). Con el tamaño conocido, como la web, devuelve su longitud exacta para
+// enviarla con Content-Length (cabeceras + archivo + cierre, con el archivo en flujo
+// detrás); si no, lo genera sobre una tubería (longitud -1, «chunked»).
+func uploadBody(metaBytes []byte, fileName string, reader io.Reader, size int64) (io.Reader, int64, string, func()) {
+	if size >= 0 {
+		var head bytes.Buffer
+		mpw := multipart.NewWriter(&head)
+		if pd, err := mpw.CreateFormField("data"); err == nil {
+			_, _ = pd.Write(metaBytes)
+		}
+		_, _ = mpw.CreateFormFile("file", fileName)
+		headBytes := append([]byte(nil), head.Bytes()...)
+		head.Reset()
+		_ = mpw.Close() // escribe solo el cierre: «\r\n--límite--\r\n»
+		tail := append([]byte(nil), head.Bytes()...)
+		length := int64(len(headBytes)) + size + int64(len(tail))
+		body := io.MultiReader(bytes.NewReader(headBytes), io.LimitReader(reader, size), bytes.NewReader(tail))
+		return body, length, mpw.FormDataContentType(), func() {}
+	}
+	pr, pw := io.Pipe()
+	mpw := multipart.NewWriter(pw)
+	go func() {
+		var writeErr error
+		defer func() {
+			if writeErr != nil {
+				_ = pw.CloseWithError(writeErr)
+			} else {
+				_ = mpw.Close()
+				_ = pw.Close()
+			}
+		}()
+		partData, err := mpw.CreateFormField("data")
+		if err != nil {
+			writeErr = err
+			return
+		}
+		if _, err := partData.Write(metaBytes); err != nil {
+			writeErr = err
+			return
+		}
+		partFile, err := mpw.CreateFormFile("file", fileName)
+		if err != nil {
+			writeErr = err
+			return
+		}
+		if _, err := io.Copy(partFile, reader); err != nil {
+			writeErr = err
+			return
+		}
+	}()
+	return pr, -1, mpw.FormDataContentType(), func() { _ = pr.Close() }
 }
