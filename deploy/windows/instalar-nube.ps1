@@ -91,7 +91,7 @@ $items = $Rutas | ForEach-Object { Get-Item -LiteralPath $_ }
 # Carpetas: cada una con su nombre dentro del destino.
 foreach ($d in $items | Where-Object { $_.PSIsContainer }) {
     Write-Host "`n$($d.Name)\  ->  $dest\$($d.Name)" -ForegroundColor Cyan
-    & $rclone copy $d.FullName "$base/$($d.Name)" --transfers 4 --progress --stats 2s
+    & $rclone copy $d.FullName "$base/$($d.Name)" --create-empty-src-dirs --exclude Thumbs.db --exclude desktop.ini --transfers 4 --progress --stats 2s
     if ($LASTEXITCODE -ne 0) { $fallos++ }
 }
 # Ficheros sueltos: juntos por carpeta de origen, varios a la vez.
