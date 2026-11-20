@@ -78,7 +78,8 @@ try {
 while ($true) {
     $delante = @(Get-ChildItem $cola -Filter *.txt | Sort-Object Name | Where-Object {
         $p = [int]($_.BaseName -split '-')[1]
-        if ($p -eq $PID -or (Get-Process -Id $p -ErrorAction SilentlyContinue)) { $true } else { Remove-Item $_.FullName -ErrorAction SilentlyContinue; $false }
+        # Un PID reutilizado por otro programa no debe bloquear la cola: solo cuenta si es otro envío (PowerShell).
+        if ($p -eq $PID -or (Get-Process -Id $p -ErrorAction SilentlyContinue).ProcessName -eq 'powershell') { $true } else { Remove-Item $_.FullName -ErrorAction SilentlyContinue; $false }
     })
     $pos = [array]::IndexOf(@($delante | ForEach-Object { $_.FullName }), $turno)
     if ($pos -le 0) { break }
