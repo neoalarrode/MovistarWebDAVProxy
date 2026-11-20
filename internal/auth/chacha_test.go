@@ -2,7 +2,9 @@ package auth
 
 import (
 	"context"
+	"net/http"
 	"os"
+	"strings"
 	"testing"
 	"time"
 
@@ -45,5 +47,40 @@ func TestChachaLiveMovistar(t *testing.T) {
 	t.Logf("cifrado negociado: %s", utls.CipherSuiteName(st.CipherSuite))
 	if st.CipherSuite != utls.TLS_CHACHA20_POLY1305_SHA256 {
 		t.Fatalf("esperado ChaCha20, negociado %s", utls.CipherSuiteName(st.CipherSuite))
+	}
+}
+
+// Las subidas (upload.*) también con ChaCha20 y HTTP/1.1 (MOVISTAR_TLS_LIVE=1): sin
+// sesión el servidor debe responder como siempre, no con un 403 del WAF.
+func TestChachaLiveMovistarUpload(t *testing.T) {
+	if os.Getenv("MOVISTAR_TLS_LIVE") == "" {
+		t.Skip("MOVISTAR_TLS_LIVE no definido")
+	}
+	t.Setenv("TLS_PREFER_CHACHA", "true")
+	t.Setenv("UTLS_CLIENT_HELLO", "chrome")
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	defer cancel()
+	c, err := dialTLSContextHTTP1Only(ctx, "tcp", "upload.micloud.movistar.es:443")
+	if err != nil {
+		t.Fatal(err)
+	}
+	st := c.(*utls.UConn).ConnectionState()
+	_ = c.Close()
+	t.Logf("cifrado negociado: %s, ALPN %q", utls.CipherSuiteName(st.CipherSuite), st.NegotiatedProtocol)
+	if st.CipherSuite != utls.TLS_CHACHA20_POLY1305_SHA256 {
+		t.Fatalf("esperado ChaCha20, negociado %s", utls.CipherSuiteName(st.CipherSuite))
+	}
+
+	tr := NewFingerprintedTransport().(interface{ HTTP1Transport() *http.Transport }).HTTP1Transport()
+	req, _ := http.NewRequestWithContext(ctx, "POST", "https://upload.micloud.movistar.es/sapi/upload?action=save", strings.NewReader("{}"))
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := tr.RoundTrip(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = resp.Body.Close()
+	t.Logf("respuesta sin sesión: %d", resp.StatusCode)
+	if resp.StatusCode == http.StatusForbidden {
+		t.Fatalf("403: el WAF rechaza la huella")
 	}
 }

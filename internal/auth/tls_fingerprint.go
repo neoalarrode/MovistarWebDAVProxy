@@ -309,6 +309,14 @@ func NewFingerprintedTransport() http.RoundTripper {
 		MaxConnsPerHost:       100,
 	}
 
+	if preferChaCha() {
+		// Sin AES por hardware, crypto/tls negocia AES-GCM con upload.* (CloudFront
+		// elige AES si se le ofrece) y lo cifra por software: en la Pi 4 era lo que más
+		// CPU gastaba al subir (perfil del 20/11/2026: ~45 % del proxy en AES/GHASH a
+		// ~28 MB/s). Con uTLS solo se ofrece ChaCha20 en TLS 1.3, como en las descargas.
+		h1.DialTLSContext = dialTLSContextHTTP1Only
+	}
+
 	ft := &fingerprintedTransport{h1: h1, h2: h2}
 	if IsDesktopProfile() {
 		ft.sapiH1 = newSAPIHTTP1Transport()
