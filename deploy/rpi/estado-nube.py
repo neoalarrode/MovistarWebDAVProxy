@@ -167,6 +167,30 @@ def net_status():
     return "cable", speed
 
 
+def wifi_status():
+    """Enlace Wi-Fi (aunque esté en reserva): señal en dBm, velocidades y banda, de «iw»."""
+    try:
+        out = subprocess.run(["/usr/sbin/iw", "dev", "wlan0", "link"], capture_output=True, text=True, timeout=2).stdout
+    except (OSError, subprocess.SubprocessError):
+        return None
+    if "Not connected" in out or "signal" not in out:
+        return {}
+    info = {}
+    for line in out.splitlines():
+        k, _, v = line.strip().partition(":")
+        v = v.strip()
+        try:
+            if k == "signal":
+                info["signal"] = int(float(v.split()[0]))
+            elif k in ("rx bitrate", "tx bitrate"):
+                info[k.split()[0]] = float(v.split()[0])
+            elif k == "freq":
+                info["ghz"] = float(v.split()[0]) / 1000
+        except (ValueError, IndexError):
+            pass
+    return info
+
+
 def human(n, per_s=False):
     if n is None:
         return "?"
@@ -293,6 +317,18 @@ def draw_session(win, y, x, h, w, sess, cstat, storage, crypt):
     if cstat is not None:
         row(win, cy + 7, cx, cw, "Límite subida", cstat.get("bwlimit") or "off")
     via, detail = net_status()
+    wf = wifi_status()
+    if wf is not None:
+        if not wf:
+            row(win, cy + 9, cx, cw, "Wi-Fi", "● desconectado", curses.color_pair(C_BAD))
+        else:
+            sig = wf.get("signal")
+            col = C_OK if sig is not None and sig >= -60 else (C_WARN if sig is not None and sig >= -70 else C_BAD)
+            estado = "en uso" if via == "wifi" else "reserva"
+            enlace = f"{max(wf.get('rx', 0), wf.get('tx', 0)):.0f} Mbit/s"
+            banda = ("5 GHz" if wf["ghz"] > 4 else "2,4 GHz") if wf.get("ghz") else ""
+            señal = f"{sig} dBm" if sig is not None else "?"
+            row(win, cy + 9, cx, cw, "Wi-Fi", " · ".join(p for p in (f"● {estado}", señal, enlace, banda) if p), curses.color_pair(col))
     if via == "cable":
         row(win, cy + 8, cx, cw, "Conexión", f"● Cable  {detail}".rstrip(), curses.color_pair(C_OK))
     elif via == "wifi":
@@ -448,7 +484,7 @@ def main(stdscr):
         put(stdscr, 0, 1, f" Nube de Emby · {host} ", curses.color_pair(C_TITLE) | curses.A_BOLD | curses.A_REVERSE)
         put(stdscr, 0, max(W - 22, 1), datetime.now().strftime("%d/%m/%Y %H:%M:%S"), curses.color_pair(C_DIM))
         top = 1
-        top_h = 11
+        top_h = 12
         if W >= 90:
             lw = W // 2
             draw_session(stdscr, top, 0, top_h, lw, sess, cstat, storage, crypt)
