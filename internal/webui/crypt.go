@@ -142,8 +142,8 @@ func (s *Server) handleCryptFolderDelete(w http.ResponseWriter, r *http.Request)
 }
 
 // handleCryptGenerate crea una clave nueva para una carpeta sin configurar (crypt
-// sobre chunker, como la recomendada), la guarda y devuelve UNA vez su configuración
-// para que el usuario la guarde: sin ella no se puede leer nada de lo subido.
+// sobre chunker, como la recomendada), la guarda y devuelve su configuración, que
+// también se puede volver a ver desde el panel (handleCryptFolderConfig).
 func (s *Server) handleCryptGenerate(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		jsonResponse(w, http.StatusMethodNotAllowed, map[string]interface{}{"status": "error"})
@@ -177,6 +177,41 @@ func (s *Server) handleCryptGenerate(w http.ResponseWriter, r *http.Request) {
 	}
 	s.restartCrypt()
 	jsonResponse(w, http.StatusOK, map[string]interface{}{"status": "ok", "config": text})
+}
+
+// handleCryptFolderConfig devuelve la configuración guardada de una carpeta (tal cual,
+// con sus contraseñas) para verla o editarla en el panel.
+func (s *Server) handleCryptFolderConfig(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		Name string `json:"name"`
+	}
+	if !decodeJSONBody(w, r, &req) {
+		return
+	}
+	w.Header().Set("Cache-Control", "no-store")
+	for _, f := range vault.Folders() {
+		if f.Name == req.Name {
+			jsonResponse(w, http.StatusOK, map[string]interface{}{"status": "ok", "name": f.Name, "config": f.Config, "top": f.Top})
+			return
+		}
+	}
+	jsonResponse(w, http.StatusNotFound, map[string]interface{}{"status": "error", "message": "«" + req.Name + "» no tiene configuración"})
+}
+
+// handleWebDAVCredentials devuelve el usuario y la contraseña del WebDAV (WEBDAV_USER y
+// WEBDAV_PASSWORD) para verlos en el panel. Con solo WEBDAV_PASSWORD_HASH no hay
+// contraseña que enseñar.
+func (s *Server) handleWebDAVCredentials(w http.ResponseWriter, r *http.Request) {
+	if !requirePost(w, r) {
+		return
+	}
+	w.Header().Set("Cache-Control", "no-store")
+	c := config.LoadWebDAVAuthConfig()
+	out := map[string]interface{}{"status": "ok", "user": c.Username, "password": c.Password}
+	if c.Password == "" && c.PasswordHash != "" {
+		out["message"] = "Solo hay hash de la contraseña (WEBDAV_PASSWORD_HASH): no se puede mostrar."
+	}
+	jsonResponse(w, http.StatusOK, out)
 }
 
 // handleMediaDiagnostics (solo lectura): lo que SAPI dice de uno o varios archivos

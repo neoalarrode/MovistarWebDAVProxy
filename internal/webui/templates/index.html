@@ -179,6 +179,17 @@
                         <span class="font-medium">Puerto WebDAV (host):</span>
                         <span id="webdav-host-port" class="font-mono font-semibold">5050</span>
                     </div>
+                    <div class="flex justify-between items-center text-slate-600 gap-2">
+                        <span class="font-medium">Usuario WebDAV:</span>
+                        <span class="flex items-center gap-1.5"><span id="dav-user" class="font-mono font-semibold">••••</span>
+                        <button onclick="copyDav('user')" class="px-1.5 py-0.5 rounded border border-slate-200 bg-white hover:bg-slate-100 text-[10px]">Copiar</button></span>
+                    </div>
+                    <div class="flex justify-between items-center text-slate-600 gap-2">
+                        <span class="font-medium">Contraseña WebDAV:</span>
+                        <span class="flex items-center gap-1.5"><span id="dav-pass" class="font-mono font-semibold break-all">••••••••</span>
+                        <button id="dav-pass-btn" onclick="toggleDavPass()" class="px-1.5 py-0.5 rounded border border-slate-200 bg-white hover:bg-slate-100 text-[10px]">Mostrar</button>
+                        <button onclick="copyDav('password')" class="px-1.5 py-0.5 rounded border border-slate-200 bg-white hover:bg-slate-100 text-[10px]">Copiar</button></span>
+                    </div>
                     <div class="flex justify-between text-slate-600">
                         <span class="font-medium">Espacio en la Nube:</span>
                         <span id="cloud-storage-used" class="font-semibold text-blue-700">Consultando...</span>
@@ -272,9 +283,10 @@
             <p class="text-sm font-medium mb-2">Configuración de «<span id="cr-edit-name"></span>»</p>
             <textarea id="cr-conf" rows="12" spellcheck="false" placeholder="Pega aquí las secciones de rclone.conf de esta carpeta tal cual (p. ej. [movistar-chunk] y [movistar-crypt]). La sección WebDAV de abajo, si la pegas, se ignora: la carpeta se engancha sola a la nube." class="w-full px-3 py-2 bg-slate-50 border border-slate-200 rounded-lg text-xs font-mono"></textarea>
             <input id="cr-top" type="text" placeholder="Remoto de arriba (solo si hay varios candidatos, p. ej. movistar-crypt)" class="mt-2 w-full px-3 py-2 bg-slate-50 border border-slate-200 rounded-lg text-xs font-mono">
-            <p class="text-xs text-slate-500 mt-2">Las contraseñas pueden ir ofuscadas (como en rclone.conf) o en claro. Todo se guarda cifrado en el proxy.</p>
+            <p class="text-xs text-slate-500 mt-2">Las contraseñas pueden ir ofuscadas (como en rclone.conf) o en claro. Todo se guarda cifrado en el proxy. Si la carpeta ya tiene configuración, aquí aparece la guardada.</p>
             <div class="flex flex-wrap gap-2 mt-3">
                 <button onclick="saveFolderConf()" class="px-3 py-1.5 bg-blue-600 hover:bg-blue-700 text-white font-semibold rounded-lg text-xs">Guardar</button>
+                <button onclick="copyText(document.getElementById('cr-conf').value, 'Configuración copiada')" class="px-3 py-1.5 bg-slate-100 hover:bg-slate-200 text-slate-700 font-semibold rounded-lg text-xs border border-slate-200">Copiar</button>
                 <button onclick="document.getElementById('cr-edit').classList.add('hidden')" class="px-3 py-1.5 bg-slate-100 hover:bg-slate-200 text-slate-700 font-semibold rounded-lg text-xs border border-slate-200">Cancelar</button>
             </div>
         </div>
@@ -827,7 +839,7 @@
                 label.append(name, kind);
                 const btns = document.createElement('div'); btns.className = 'flex gap-2';
                 const mk = (txt, fn, cls) => { const b = document.createElement('button'); b.textContent = txt; b.onclick = fn; b.className = 'px-2.5 py-1 rounded-lg text-xs font-semibold border ' + cls; return b; };
-                btns.append(mk(f.configured ? 'Cambiar configuración' : 'Pegar configuración', () => editFolderConf(f.name), 'bg-slate-100 hover:bg-slate-200 text-slate-700 border-slate-200'));
+                btns.append(mk(f.configured ? 'Ver / editar configuración' : 'Pegar configuración', () => editFolderConf(f.name, f.configured), 'bg-slate-100 hover:bg-slate-200 text-slate-700 border-slate-200'));
                 if (!f.configured) btns.append(mk('Cifrar con clave nueva', () => generateCrypt(f.name), 'bg-slate-100 hover:bg-slate-200 text-slate-700 border-slate-200'));
                 else btns.append(mk('Quitar', () => deleteFolderConf(f.name), 'bg-rose-50 hover:bg-rose-100 text-rose-700 border-rose-200'));
                 row.append(label, btns);
@@ -860,13 +872,47 @@
             refreshCrypt();
         }
 
-        function editFolderConf(name) {
+        async function editFolderConf(name, configured) {
+            const conf = document.getElementById('cr-conf'), top = document.getElementById('cr-top');
             document.getElementById('cr-edit-name').textContent = name;
-            document.getElementById('cr-conf').value = '';
-            document.getElementById('cr-top').value = '';
+            conf.value = ''; top.value = '';
+            if (configured) {
+                try {
+                    const d = await (await fetch('/crypt_folder_config', {method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({name})})).json();
+                    if (d.status === 'ok') { conf.value = d.config || ''; top.value = d.top || ''; }
+                    else showToast(d.message || 'No se pudo leer la configuración', 'error');
+                } catch (err) { showToast('No se pudo leer la configuración', 'error'); }
+            }
             document.getElementById('cr-edit').classList.remove('hidden');
-            document.getElementById('cr-conf').focus();
+            conf.focus();
         }
+
+        async function copyText(text, msg) {
+            try { await navigator.clipboard.writeText(text); showToast(msg); }
+            catch (err) { showToast('No se pudo copiar (el navegador lo bloquea fuera de https/localhost)', 'error'); }
+        }
+
+        let davCreds = null;
+        async function loadDavCreds() {
+            if (davCreds) return davCreds;
+            try {
+                const d = await (await fetch('/webdav_credentials', {method: 'POST', headers: {'Content-Type': 'application/json'}, body: '{}'})).json();
+                if (d.status === 'ok') { davCreds = d; if (d.message) showToast(d.message, 'error'); }
+            } catch (err) { showToast('No se pudieron leer las credenciales', 'error'); }
+            return davCreds;
+        }
+        async function toggleDavPass() {
+            const el = document.getElementById('dav-pass'), btn = document.getElementById('dav-pass-btn');
+            if (btn.textContent === 'Ocultar') { el.textContent = '••••••••'; btn.textContent = 'Mostrar'; return; }
+            const c = await loadDavCreds(); if (!c) return;
+            document.getElementById('dav-user').textContent = c.user || '(sin usuario)';
+            el.textContent = c.password || '(no disponible)'; btn.textContent = 'Ocultar';
+        }
+        async function copyDav(field) {
+            const c = await loadDavCreds(); if (!c || !c[field]) return;
+            copyText(c[field], field === 'user' ? 'Usuario copiado' : 'Contraseña copiada');
+        }
+        loadDavCreds().then(c => { if (c) document.getElementById('dav-user').textContent = c.user || '(sin usuario)'; });
 
         async function saveFolderConf() {
             const name = document.getElementById('cr-edit-name').textContent;
@@ -891,7 +937,7 @@
             const data = await (await fetch('/crypt_generate', {method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({name})})).json();
             if (data.status !== 'ok') { showToast(data.message || 'Error', 'error'); return; }
             const box = document.getElementById('cr-new');
-            box.textContent = 'GUARDA ESTO EN LUGAR SEGURO (no se volverá a mostrar). Es la configuración de rclone de «' + name + '»; sin ella no se puede leer nada:\n\n' + data.config;
+            box.textContent = 'Configuración de rclone de «' + name + '» (sin ella no se puede leer nada; guarda una copia fuera del proxy). Puedes volver a verla con «Ver / editar configuración»:\n\n' + data.config;
             box.classList.remove('hidden');
             refreshCrypt();
         }

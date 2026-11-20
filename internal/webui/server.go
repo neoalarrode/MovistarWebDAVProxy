@@ -186,6 +186,8 @@ func (s *Server) Routes() http.Handler {
 	mux.HandleFunc("/crypt_autochunk_reset", s.handleAutoChunkReset)
 	mux.HandleFunc("/crypt_folder_delete", s.handleCryptFolderDelete)
 	mux.HandleFunc("/crypt_generate", s.handleCryptGenerate)
+	mux.HandleFunc("/crypt_folder_config", s.handleCryptFolderConfig)
+	mux.HandleFunc("/webdav_credentials", s.handleWebDAVCredentials)
 	mux.HandleFunc("/copy_status", s.handleCopyStatus)
 	mux.HandleFunc("/copy_events", s.handleCopyEvents)
 	mux.HandleFunc("/copy_bwlimit", s.handleCopyBWLimit)
