@@ -72,6 +72,14 @@ func display(p string) string {
 	return ""
 }
 
+// logName es la ruta para los registros: descifrada si se puede, si no tal cual.
+func logName(p string) string {
+	if d := display("/" + strings.TrimLeft(p, "/")); d != "" {
+		return d
+	}
+	return p
+}
+
 // Transfers registra las transferencias de este proceso.
 var Transfers = NewTransferTracker(5 * time.Minute)
 

@@ -316,10 +316,10 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		}
 		if isPropfind {
 			logger.Log("[WebDAV] ⚡ %s -> %s %s [Depth: %s] => %d (%d responses, %d bytes, %v)",
-				clientIP, method, urlPath, depth, code, lw.propfindResponses, lw.bytesWritten, dur)
+				clientIP, method, logName(urlPath), depth, code, lw.propfindResponses, lw.bytesWritten, dur)
 		} else {
 			logger.Log("[WebDAV] ⚡ %s -> %s %s => %d (%d bytes, %v)",
-				clientIP, method, urlPath, code, lw.bytesWritten, dur)
+				clientIP, method, logName(urlPath), code, lw.bytesWritten, dur)
 		}
 
 		if code == http.StatusNotFound && (method == "PROPFIND" || method == "GET") && logger.IsDebugEnabled() {

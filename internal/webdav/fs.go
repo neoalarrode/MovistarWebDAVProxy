@@ -1398,7 +1398,7 @@ func (mfs *MovistarFS) Mkdir(ctx context.Context, name string, perm os.FileMode)
 	}
 	for _, s := range subs {
 		if strings.EqualFold(s.Name, folderName) {
-			logger.Log("[WebDAV] ℹ Carpeta '%s' ya existía en Movistar/O2 Cloud (ID: %d). Reutilizando.", folderName, s.ID)
+			logger.Log("[WebDAV] ℹ Carpeta '%s' ya existía en Movistar/O2 Cloud (ID: %d). Reutilizando.", logName(cleanPath), s.ID)
 			mfs.cacheMu.Lock()
 			delete(mfs.uploadCache, lowerPath)
 			mfs.createdFolders[lowerPath] = &CreatedFolder{Info: s, Time: time.Now()}
@@ -1407,14 +1407,14 @@ func (mfs *MovistarFS) Mkdir(ctx context.Context, name string, perm os.FileMode)
 		}
 	}
 
-	logger.Log("[WebDAV] 📁 Creando carpeta: '%s' en ID %d...", folderName, parentFolder.ID)
+	logger.Log("[WebDAV] 📁 Creando carpeta: '%s' en ID %d...", logName(cleanPath), parentFolder.ID)
 	created, err := mfs.client.CreateFolder(folderName, parentFolder.ID)
 	if err != nil {
 		logger.Log("[WebDAV] ❌ Error creando carpeta '%s': %v", folderName, err)
 		return err
 	}
 
-	logger.Log("[WebDAV] ✔ Carpeta creada: '%s' (ID: %d)", folderName, created.ID)
+	logger.Log("[WebDAV] ✔ Carpeta creada: '%s' (ID: %d)", logName(cleanPath), created.ID)
 	if ms := mfs.MetadataStore(); ms != nil {
 		logMetaErr("UpsertFolder", ms.UpsertFolder(*created))
 		logMetaErr("UpdateFolderModificationDate", ms.UpdateFolderModificationDate(parentFolder.ID, time.Now().UTC().Format("20060102T150405Z")))
@@ -1839,7 +1839,7 @@ func (mfs *MovistarFS) Rename(ctx context.Context, oldName, newName string) erro
 		return err
 	}
 
-	logger.Log("[WebDAV] 🔄 Renombrando: '%s' -> '%s'...", oldClean, newClean)
+	logger.Log("[WebDAV] 🔄 Renombrando: '%s' -> '%s'...", logName(oldClean), logName(newClean))
 
 	if isF && oldFolder != nil {
 		err := mfs.client.UpdateFolder(oldFolder.ID, newBaseName, parentFolder.ID)
@@ -2394,7 +2394,7 @@ func (w *WebDAVFileWriter) startStreamUpload(initialBytes []byte) {
 	w.streamDone = make(chan streamUploadResult, 1)
 	expectedSize := w.guard.expected
 	sizeMB := float64(expectedSize) / (1024 * 1024)
-	logger.Log("[WebDAV] ⬆ Subiendo en flujo directo: '%s' (%.2f MB) a Movistar/O2 Cloud...", w.name, sizeMB)
+	logger.Log("[WebDAV] ⬆ Subiendo en flujo directo: '%s' (%.2f MB) a Movistar/O2 Cloud...", logName(w.path), sizeMB)
 	mimeType := mime.TypeByExtension(filepath.Ext(w.name))
 
 	go func() {
@@ -2854,7 +2854,7 @@ func (w *WebDAVFileWriter) Close() error {
 	}
 
 	if media == nil {
-		logger.Log("[WebDAV] ⬆ Subiendo: '%s' (%.2f MB) a Movistar/O2 Cloud...", w.name, sizeMB)
+		logger.Log("[WebDAV] ⬆ Subiendo: '%s' (%.2f MB) a Movistar/O2 Cloud...", logName(w.path), sizeMB)
 
 		if w.queued {
 			logger.Log("[WebDAV] ⏳ '%s' esperando hueco de subida en la cola...", w.name)
@@ -2897,7 +2897,7 @@ func (w *WebDAVFileWriter) Close() error {
 		}
 	}
 
-	logger.Log("[WebDAV] ✔ Subida completada: '%s' (%.2f MB, ID: %s)", w.name, sizeMB, media.ID)
+	logger.Log("[WebDAV] ✔ Subida completada: '%s' (%.2f MB, ID: %s)", logName(w.path), sizeMB, media.ID)
 
 	w.mfs.cacheMu.Lock()
 	now := time.Now()
@@ -3025,9 +3025,9 @@ func (r *WebDAVFileReader) Read(p []byte) (n int, err error) {
 		}
 		sizeMB := float64(r.item.Size) / (1024 * 1024)
 		if pos > 0 {
-			logger.Log("[WebDAV] ⬇ Descargando rango [byte %d..] de '%s' (%.2f MB)...", pos, r.item.Name, sizeMB)
+			logger.Log("[WebDAV] ⬇ Descargando rango [byte %d..] de '%s' (%.2f MB)...", pos, logName(r.path), sizeMB)
 		} else {
-			logger.Log("[WebDAV] ⬇ Descargando: '%s' (%.2f MB) desde Movistar Cloud...", r.item.Name, sizeMB)
+			logger.Log("[WebDAV] ⬇ Descargando: '%s' (%.2f MB) desde Movistar Cloud...", logName(r.path), sizeMB)
 		}
 		downloadSem <- struct{}{}
 		globalTransferSem <- struct{}{}
