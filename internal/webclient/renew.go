@@ -8,7 +8,6 @@ import (
 	"time"
 
 	"github.com/chromedp/cdproto/network"
-	"github.com/chromedp/cdproto/storage"
 	"github.com/chromedp/chromedp"
 
 	"movistar-webdav-proxy/internal/logger"
@@ -26,9 +25,10 @@ const (
 	defaultRenewBefore = time.Hour
 	renewRetryAfter    = 10 * time.Minute
 	renewWait          = 60 * time.Second // una máquina pequeña tarda más en cargar la web
-	// renewMaxFails: solo tras estos fallos seguidos se da la PLC por perdida y se
-	// borra el estado de la web. Un fallo suelto (Movistar lento) no obliga a entrar
-	// a mano: se reintenta pasados renewRetryAfter con la PLC intacta.
+	// renewMaxFails: tras estos fallos seguidos se avisa de que hay que volver a entrar.
+	// La PLC no se borra nunca sola: un corte de internet o Movistar caído un rato no
+	// la invalida, y se sigue reintentando cada renewRetryAfter. Si de verdad dejó de
+	// valer, se entra desde /web-relogin/ (sin borrar nada) o /web-login/.
 	renewMaxFails = 3
 )
 
@@ -178,19 +178,7 @@ func (s *Session) Renew(ctx context.Context) error {
 	fails := s.renewFails
 	s.stateMu.Unlock()
 	if fails < renewMaxFails {
-		return fmt.Errorf("la web no reentró con la PLC (intento %d de %d); se reintenta en %s sin borrar nada", fails, renewMaxFails, renewRetryAfter)
+		return fmt.Errorf("la web no reentró con la PLC (intento %d); se reintenta en %s sin borrar nada", fails, renewRetryAfter)
 	}
-	// Con la sesión invalidada por Movistar la web se queda cargando (logo girando)
-	// y no llega a mostrar el login: no basta con borrar PLC y JSESSIONID, también
-	// guarda estado en el almacenamiento del sitio. Se borra todo lo de la web
-	// (cookies, localStorage, IndexedDB…) y se abre /login para que la vista remota
-	// del panel enseñe la pantalla de inicio de sesión.
-	if _, err := chromedp.Call(tab, storage.ClearDataForOrigin, storage.ClearDataForOriginParams{Origin: PortalURL, StorageTypes: "all"}); err != nil {
-		logger.Log("[WebSession] ⚠️ No se pudo borrar el estado de la web: %v", err)
-	}
-	_ = chromedp.Do(tab, chromedp.Navigate(PortalURL+"/login"))
-	s.stateMu.Lock()
-	s.remember, s.renewFails = false, 0
-	s.stateMu.Unlock()
-	return errors.New("la web no reentró con la PLC tras varios intentos (caducada o invalidada); se ha borrado el estado de la web y la página de inicio de sesión queda lista en el panel")
+	return fmt.Errorf("la web no reentró con la PLC tras %d intentos seguidos; se sigue reintentando cada %s. Si la sesión dejó de valer, vuelve a entrar desde el panel en /web-relogin/", fails, renewRetryAfter)
 }

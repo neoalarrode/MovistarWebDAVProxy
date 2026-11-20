@@ -74,7 +74,7 @@ type Session struct {
 	renewMu      sync.RWMutex
 	lastRenewAt  time.Time
 	lastRenewTry time.Time
-	renewFails   int // renovaciones fallidas seguidas (se borra el estado de la web al llegar a renewMaxFails)
+	renewFails   int // renovaciones fallidas seguidas (al llegar a renewMaxFails se avisa; nunca se borra la PLC)
 
 	re relogin // inicio de sesión aparte, sin cerrar el actual (relogin.go)
 }

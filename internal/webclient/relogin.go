@@ -77,6 +77,7 @@ func (s *Session) reloginTab() (context.Context, error) {
 // Se cierra sola a los 30 minutos si no se completa.
 func (s *Session) watchRelogin(tab context.Context) {
 	deadline := time.Now().Add(30 * time.Minute)
+	fails := 0
 	for time.Now().Before(deadline) && tab.Err() == nil {
 		time.Sleep(3 * time.Second)
 		_, remember, err := sessionCookies(tab)
@@ -84,7 +85,13 @@ func (s *Session) watchRelogin(tab context.Context) {
 			continue
 		}
 		if err := s.adoptRelogin(tab); err != nil {
-			logger.Log("[WebSession] ❌ No se pudo pasar la sesión nueva a la principal: %v (la actual sigue igual)", err)
+			// Cada intento recarga la web principal: no se insiste indefinidamente.
+			if fails++; fails >= 3 {
+				logger.Log("[WebSession] ❌ No se pudo pasar la sesión nueva a la principal tras %d intentos: %v. Vuelve a abrir /web-relogin/.", fails, err)
+				break
+			}
+			logger.Log("[WebSession] ⚠️ No se pudo pasar la sesión nueva a la principal: %v; se reintenta", err)
+			time.Sleep(10 * time.Second)
 			continue
 		}
 		break

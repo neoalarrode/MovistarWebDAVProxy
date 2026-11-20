@@ -12,6 +12,7 @@ import (
 
 	"github.com/chromedp/cdproto/input"
 	"github.com/chromedp/cdproto/page"
+	"github.com/chromedp/cdproto/storage"
 	"github.com/chromedp/chromedp"
 )
 
@@ -148,7 +149,10 @@ func (v *LoginView) serveIndex(w http.ResponseWriter, r *http.Request) {
 
 // openLoginPage lleva la pestaña a la página de inicio de sesión si no hay sesión
 // y no se está ya en ella (o en el login de Telefónica). La portada de la web, sin
-// sesión válida, puede quedarse cargando (logo girando) sin enseñar el login.
+// sesión válida, puede quedarse cargando (logo girando) sin enseñar el login: no
+// basta con navegar, también guarda estado en el almacenamiento del sitio, así que
+// se borra todo lo de la web. Solo aquí, cuando el usuario abre la vista para
+// entrar: la renovación automática nunca borra la PLC.
 func (v *LoginView) openLoginPage() {
 	if v.alwaysLogin || v.LoggedIn == nil || v.LoggedIn() {
 		return
@@ -163,6 +167,7 @@ func (v *LoginView) openLoginPage() {
 	if err != nil || strings.Contains(href, "/login") || strings.Contains(href, "t3.movistar.es") || strings.Contains(href, "telefonica.es") {
 		return
 	}
+	_, _ = chromedp.Call(ctx, storage.ClearDataForOrigin, storage.ClearDataForOriginParams{Origin: PortalURL, StorageTypes: "all"})
 	_ = chromedp.Do(ctx, chromedp.Navigate(PortalURL+"/login"))
 }
 
