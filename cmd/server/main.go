@@ -254,6 +254,8 @@ func main() {
 	uiServer := webui.NewServerWithAuth(client, webdavServer, uiAuth)
 	cryptSvc := setupCrypt(webdavPort, rawPort)
 	go watchHealth(ctx, webSess, cryptSvc)
+	bot := &botDeps{started: time.Now(), sess: webSess, svc: cryptSvc, meta: metaStore, client: client}
+	go notifier.PollCommands(ctx, botCommands, botKeyboard, bot.handle)
 	defer cryptSvc.Stop()
 	pubHTTP := &http.Server{
 		Addr:              ":" + webdavPort,

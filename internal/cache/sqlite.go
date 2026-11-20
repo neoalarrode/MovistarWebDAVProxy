@@ -1491,3 +1491,11 @@ func (s *MetadataStore) ListTinyMissing(limit int) ([]sapi.MediaItem, error) {
 	}
 	return out, rows.Err()
 }
+
+// CountFolders devuelve cuántas carpetas de la cuenta conoce la caché (Movistar
+// limita el total; ver el comando /carpetas del bot).
+func (s *MetadataStore) CountFolders() (int, error) {
+	var n int
+	err := s.db.QueryRow("SELECT COUNT(*) FROM folders").Scan(&n)
+	return n, err
+}

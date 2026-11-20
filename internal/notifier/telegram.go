@@ -130,7 +130,16 @@ func (t *TelegramNotifier) SendMessage(text string) error { return t.send(text, 
 // escapado (html.EscapeString), si no Telegram rechaza el mensaje.
 func (t *TelegramNotifier) sendHTML(text string) error { return t.send(text, true) }
 
+// sendHTMLWith es sendHTML con campos extra en la petición (p. ej. reply_markup).
+func (t *TelegramNotifier) sendHTMLWith(text string, extra map[string]interface{}) error {
+	return t.sendExtra(text, true, extra)
+}
+
 func (t *TelegramNotifier) send(text string, asHTML bool) error {
+	return t.sendExtra(text, asHTML, nil)
+}
+
+func (t *TelegramNotifier) sendExtra(text string, asHTML bool, extra map[string]interface{}) error {
 	t.mu.Lock()
 	token := t.botToken
 	chatID := t.chatID
@@ -149,6 +158,9 @@ func (t *TelegramNotifier) send(text string, asHTML bool) error {
 	}
 	if asHTML {
 		payload["parse_mode"] = "HTML"
+	}
+	for k, v := range extra {
+		payload[k] = v
 	}
 
 	bodyBytes, err := json.Marshal(payload)
@@ -283,6 +295,9 @@ func (t *TelegramNotifier) SendAlert(alertKey, icon, title, description, details
 	}
 	sb.WriteString(fmt.Sprintf("Hora: %s", time.Now().Format("2006-01-02 15:04:05")))
 
+	if m, ok := alertMarkup.Load().(map[string]interface{}); ok && m != nil {
+		return t.sendHTMLWith(sb.String(), map[string]interface{}{"reply_markup": m})
+	}
 	return t.sendHTML(sb.String())
 }
 
