@@ -31,6 +31,10 @@ func newDecryptedGateway(rcloneAddr string, raw *webdav.Server, svc *rclonesvc.S
 	rp := httputil.NewSingleHostReverseProxy(target)
 	rp.FlushInterval = -1 // descargas y subidas en flujo, sin acumular
 	rp.ErrorHandler = func(w http.ResponseWriter, r *http.Request, err error) {
+		if r.Context().Err() != nil {
+			// El cliente se fue (p. ej. Emby cancela una lectura al saltar): no es un fallo de rclone.
+			return
+		}
 		logger.Log("[Descifrado] ⚠️ %s %s: rclone interno no responde: %v", r.Method, r.URL.Path, err)
 		w.Header().Set("Retry-After", "5")
 		http.Error(w, "Servicio descifrado no disponible, reintenta", http.StatusServiceUnavailable)
