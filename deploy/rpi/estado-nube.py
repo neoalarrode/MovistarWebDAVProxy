@@ -365,7 +365,12 @@ def main(stdscr):
         logs = api("/logs")
         tick += 1
 
-        stdscr.erase()
+        # Redibujo completo cada ~10 s: si algo escribe en la consola (mensajes del
+        # sistema), la pantalla se desplaza y curses solo repintaría lo que cambia.
+        if tick % 5 == 1:
+            stdscr.clear()
+        else:
+            stdscr.erase()
         H, W = stdscr.getmaxyx()
         put(stdscr, 0, 1, f" Nube de Emby · {host} ", curses.color_pair(C_TITLE) | curses.A_BOLD | curses.A_REVERSE)
         put(stdscr, 0, max(W - 22, 1), datetime.now().strftime("%d/%m/%Y %H:%M:%S"), curses.color_pair(C_DIM))
