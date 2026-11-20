@@ -45,6 +45,11 @@ func (s *Session) reloginTab() (context.Context, error) {
 	if s.re.tab != nil && s.re.tab.Err() == nil {
 		return s.re.tab, nil
 	}
+	if !s.re.adopted.IsZero() && time.Since(s.re.adopted) < 10*time.Minute {
+		// Recién adoptada: la página sigue pidiendo la pantalla; se le enseña la
+		// principal en vez de abrir otro inicio de sesión aparte.
+		return s.tab()
+	}
 	main, err := s.tab()
 	if err != nil {
 		return nil, err

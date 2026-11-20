@@ -104,45 +104,10 @@ func (g *decryptedGateway) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 	}
-	if r.Method == http.MethodPut {
-		sw := &statusWriter{ResponseWriter: w}
-		g.upstream.ServeHTTP(sw, r)
-		if sw.status >= 200 && sw.status < 300 {
-			// rclone guarda en caché la hora de subida; la nube ya tiene la fecha
-			// original (X-OC-Mtime): que la vuelva a leer.
-			if err := rclonesvc.Forget(path.Clean("/" + r.URL.Path)); err != nil {
-				logger.Log("[Descifrado] ⚠️ No se pudo refrescar '%s' en el rclone interno: %v", r.URL.Path, err)
-			}
-		}
-		return
-	}
+	// Tras una subida no se pide al rclone interno que olvide el archivo: rclone 1.76
+	// ya guarda la fecha de X-OC-Mtime, y olvidar un archivo le hace releer la carpeta
+	// entera (y el chunker, los metadatos de cada archivo) en cada subida.
 	g.upstream.ServeHTTP(w, r)
-}
-
-// statusWriter guarda el código de respuesta.
-type statusWriter struct {
-	http.ResponseWriter
-	status int
-}
-
-func (s *statusWriter) WriteHeader(code int) {
-	if s.status == 0 {
-		s.status = code
-	}
-	s.ResponseWriter.WriteHeader(code)
-}
-
-func (s *statusWriter) Write(b []byte) (int, error) {
-	if s.status == 0 {
-		s.status = http.StatusOK
-	}
-	return s.ResponseWriter.Write(b)
-}
-
-func (s *statusWriter) Flush() {
-	if f, ok := s.ResponseWriter.(http.Flusher); ok {
-		f.Flush()
-	}
 }
 
 // rawPathFor traduce una ruta del WebDAV público a la ruta en bruto en la nube:

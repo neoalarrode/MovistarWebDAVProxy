@@ -243,7 +243,7 @@ func (s *Service) args(conf string) []string {
 		"--dir-cache-time", "1h", "--log-level", "NOTICE",
 		// Búferes con mmap: devuelve antes la memoria al sistema (máquinas pequeñas).
 		"--use-mmap",
-		// Control remoto local (vfs/forget tras cada subida, ver Forget).
+		// Control remoto local (p. ej. para olvidar una carpeta, ver Forget).
 		"--rc", "--rc-addr", RCAddr, "--rc-no-auth"}
 	if s.opts.User != "" {
 		a = append(a, "--user", s.opts.User, "--pass", s.opts.Pass)
