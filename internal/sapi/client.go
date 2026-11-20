@@ -309,7 +309,7 @@ func NewClient(cfg config.AccountConfig) (*Client, error) {
 	// HTML de SAPI inyecten cookies anónimas o duplicadas: las cabeceras Cookie de
 	// sesión (JSESSIONID / validationkey) se gestionan explícitamente desde c.cfg.
 	httpClient := &http.Client{
-		Transport: transport,
+		Transport: newResettableTransport(transport),
 		Timeout:   0,
 	}
 
@@ -358,7 +358,7 @@ func (c *Client) EnableWebSession(ws WebSession, rt http.RoundTripper) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	c.web = ws
-	c.httpClient.Transport = rt
+	c.httpClient.Transport = newResettableTransport(rt)
 	c.httpClient.Jar = nil
 	c.sessionExpired = false
 }
@@ -2334,10 +2334,8 @@ func (c *Client) UploadFileToFolder(fileName string, reader io.Reader, size int6
 		closeBody()
 		if stalled {
 			cancel()
-			logger.Log("[SAPI] ⚠️ Movistar dejó de leer la subida de '%s' (%.2f MB) durante %s: se corta y cuenta como rechazo por tamaño.", fileName, float64(size)/(1024*1024), uploadStallTimeout)
-			if UploadRejected != nil && size > 0 {
-				UploadRejected(size)
-			}
+			logger.Log("[SAPI] ⚠️ Movistar dejó de leer la subida de '%s' (%.2f MB) durante %s: se corta (el cliente la reintenta).", fileName, float64(size)/(1024*1024), uploadStallTimeout)
+			noteUploadStall(size, time.Now())
 			if resp != nil {
 				_ = resp.Body.Close()
 			}

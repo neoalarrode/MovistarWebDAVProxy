@@ -253,13 +253,15 @@ func main() {
 	// avisará por telegram si OnSessionExpired, al cargas notificaciones
 	uiServer := webui.NewServerWithAuth(client, webdavServer, uiAuth)
 	cryptSvc := setupCrypt(webdavPort, rawPort)
+	gw := newDecryptedGateway(internalDecryptedAddr, webdavServer, cryptSvc)
+	gw.onNetChange = func(via string) { onNetworkChange(via, webSess) }
 	go watchHealth(ctx, webSess, cryptSvc)
 	bot := &botDeps{started: time.Now(), sess: webSess, svc: cryptSvc, meta: metaStore, client: client}
 	go notifier.PollCommands(ctx, botCommands, botKeyboard, bot.handle)
 	defer cryptSvc.Stop()
 	pubHTTP := &http.Server{
 		Addr:              ":" + webdavPort,
-		Handler:           newDecryptedGateway(internalDecryptedAddr, webdavServer, cryptSvc),
+		Handler:           gw,
 		ReadHeaderTimeout: 10 * time.Second,
 		IdleTimeout:       120 * time.Second,
 		// Sin carpetas configuradas el WebDAV en bruto atiende directamente.

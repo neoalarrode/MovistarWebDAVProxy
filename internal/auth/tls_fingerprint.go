@@ -64,10 +64,7 @@ func FingerprintName() string {
 // uTLS para que el ClientHello imite al perfil elegido en lugar del de crypto/tls.
 // Firma compatible con http2.Transport.DialTLSContext.
 func dialTLSContextWithUTLSALPN(ctx context.Context, network, addr string, nextProtos []string) (net.Conn, error) {
-	plainConn, err := (&net.Dialer{
-		Timeout:   30 * time.Second,
-		KeepAlive: 30 * time.Second,
-	}).DialContext(ctx, network, addr)
+	plainConn, err := newDialer().DialContext(ctx, network, addr)
 	if err != nil {
 		return nil, err
 	}
@@ -202,10 +199,7 @@ func dialTLSContextHTTP1Only(ctx context.Context, network, addr string) (net.Con
 		return dialTLSContextWithUTLSALPN(ctx, network, addr, []string{"http/1.1"})
 	}
 
-	plainConn, err := (&net.Dialer{
-		Timeout:   30 * time.Second,
-		KeepAlive: 30 * time.Second,
-	}).DialContext(ctx, network, addr)
+	plainConn, err := newDialer().DialContext(ctx, network, addr)
 	if err != nil {
 		return nil, err
 	}
@@ -270,6 +264,15 @@ func (t *fingerprintedTransport) RoundTrip(req *http.Request) (*http.Response, e
 	return t.h1.RoundTrip(req)
 }
 
+// CloseIdleConnections cierra las conexiones abiertas de todos sus transportes.
+func (t *fingerprintedTransport) CloseIdleConnections() {
+	t.h1.CloseIdleConnections()
+	t.h2.CloseIdleConnections()
+	if t.sapiH1 != nil {
+		t.sapiH1.CloseIdleConnections()
+	}
+}
+
 // UsesHTTP1ForSAPI indica si los hosts SAPI van por HTTP/1.1 (perfil "desktop").
 func (t *fingerprintedTransport) UsesHTTP1ForSAPI() bool {
 	return t.sapiH1 != nil
@@ -291,10 +294,7 @@ func NewFingerprintedTransport() http.RoundTripper {
 	}
 
 	h1 := &http.Transport{
-		DialContext: (&net.Dialer{
-			Timeout:   30 * time.Second,
-			KeepAlive: 30 * time.Second,
-		}).DialContext,
+		DialContext: newDialer().DialContext,
 		// El host de subida devuelve HTTP 408 ("Server timeout waiting for the
 		// HTTP request from the client") si se reutiliza una conexión keep-alive
 		// que el servidor ya consideraba caducada. Forzamos conexión nueva por
@@ -328,10 +328,7 @@ func NewFingerprintedTransport() http.RoundTripper {
 // HTTP/1.1 con keep-alive (como el cliente oficial) y ALPN "http/1.1".
 func newSAPIHTTP1Transport() *http.Transport {
 	return &http.Transport{
-		DialContext: (&net.Dialer{
-			Timeout:   30 * time.Second,
-			KeepAlive: 30 * time.Second,
-		}).DialContext,
+		DialContext:           newDialer().DialContext,
 		DialTLSContext:        dialTLSContextHTTP1Only,
 		ForceAttemptHTTP2:     false,
 		TLSHandshakeTimeout:   15 * time.Second,
@@ -348,10 +345,7 @@ func newSAPIHTTP1Transport() *http.Transport {
 // CloudFront trata el login de forma distinta a los endpoints SAPI normales.
 func NewHTTP1FingerprintedTransport() http.RoundTripper {
 	return &http.Transport{
-		DialContext: (&net.Dialer{
-			Timeout:   30 * time.Second,
-			KeepAlive: 30 * time.Second,
-		}).DialContext,
+		DialContext:           newDialer().DialContext,
 		DialTLSContext:        dialTLSContextWithUTLSHTTP1,
 		ForceAttemptHTTP2:     false,
 		TLSHandshakeTimeout:   15 * time.Second,
@@ -367,10 +361,7 @@ func NewHTTP1FingerprintedTransport() http.RoundTripper {
 // de CloudFront tratan de forma distinta el ClientHello cuando ALPN está vacío.
 func NewNoALPNHTTP1Transport() http.RoundTripper {
 	return &http.Transport{
-		DialContext: (&net.Dialer{
-			Timeout:   30 * time.Second,
-			KeepAlive: 30 * time.Second,
-		}).DialContext,
+		DialContext:           newDialer().DialContext,
 		DialTLSContext:        dialTLSContextWithUTLSNoALPN,
 		ForceAttemptHTTP2:     false,
 		TLSHandshakeTimeout:   15 * time.Second,

@@ -90,7 +90,10 @@ while ($true) {
 # Estado para el panel de la Pi: total copiado, pendiente y tiempo restante. Se le
 # pregunta al rclone de la copia (control remoto solo local) y se manda a la Pi con
 # las credenciales del WebDAV. Si algo falla, la copia sigue igual.
-$rcCopia = @("--rc", "--rc-addr", "127.0.0.1:5574", "--rc-user", "nube", "--rc-pass", $RcPass)
+$rcCopia = @("--rc", "--rc-addr", "127.0.0.1:5574", "--rc-user", "nube", "--rc-pass", $RcPass,
+    # Paciencia ante cortes (p. ej. la Pi pasa del cable al Wi-Fi): cada archivo se vuelve a
+    # mandar entero hasta 20 veces y la copia completa se repite hasta 10 veces.
+    "--low-level-retries", "20", "--retries", "10", "--retries-sleep", "30s")
 $destFile = Join-Path $cola ("{0}.destino" -f $PID) # no .txt: esos son los turnos de la cola
 $informe = $null
 try {

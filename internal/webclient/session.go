@@ -32,11 +32,30 @@ const sapiJS = `window.__sapi = async (method, path, body, ctype, deviceId) => {
   const m = document.cookie.match(/validationKey=([^;]+)/);
   const vk = m ? decodeURIComponent(m[1]) : '';
   const sep = path.includes('?') ? '&' : '?';
-  const opts = {method, credentials: 'include', headers: {'Accept': 'application/json', 'X-deviceid': 'web-' + deviceId}};
+  const opts = {method, credentials: 'include', headers: {'Accept': 'application/json', 'X-deviceid': 'web-' + deviceId}, signal: AbortSignal.timeout(85000)};
   if (body !== null) { opts.headers['Content-Type'] = ctype || 'application/json;charset=UTF-8'; opts.body = body; }
   const r = await fetch(path + (vk ? sep + 'validationkey=' + encodeURIComponent(vk) : ''), opts);
   return {status: r.status, ctype: r.headers.get('content-type') || '', body: await r.text()};
 }; true`
+
+// sapiCallTimeout es lo máximo que espera una llamada a SAPI desde la web.
+const sapiCallTimeout = 90 * time.Second
+
+// ResetNetwork relanza Chromium tras un cambio de red (cable ↔ Wi-Fi): sus conexiones
+// abiertas se quedan muertas y no las da por perdidas hasta pasados minutos. La sesión
+// sigue, porque las cookies están en el perfil; mientras dura no sale ninguna llamada.
+func (s *Session) ResetNetwork() error {
+	// Primero se cierra: las llamadas en curso fallan al momento (y se reintentan) en
+	// vez de esperar su plazo; luego, sin llamadas en vuelo, se relanza.
+	s.Close()
+	s.renewMu.Lock()
+	defer s.renewMu.Unlock()
+	if _, err := s.tab(); err != nil {
+		return err
+	}
+	logger.Log("[WebSession] 🔌 Navegador relanzado por el cambio de red")
+	return nil
+}
 
 // ErrNotLoggedIn indica que la sesión de la web no está iniciada o ha caducado.
 var ErrNotLoggedIn = errors.New("sesión web de Movistar Cloud no iniciada o caducada")
@@ -254,7 +273,11 @@ func (s *Session) eval(tab context.Context, method, path string, body []byte, co
 		bodyJS = string(b)
 	}
 	expr := fmt.Sprintf("window.__sapi(%q, %q, %s, %q, %q)", method, path, bodyJS, contentType, s.deviceID)
-	r, err := chromedp.Run(tab, chromedp.Evaluate[Response](expr, chromedp.EvalAwaitPromise))
+	// Con plazo: si la conexión de la web se queda muerta (p. ej. se fue el cable) la
+	// llamada no puede esperar para siempre (la web también corta a los 85 s).
+	ctx, cancel := context.WithTimeout(tab, sapiCallTimeout)
+	defer cancel()
+	r, err := chromedp.Run(ctx, chromedp.Evaluate[Response](expr, chromedp.EvalAwaitPromise))
 	if err != nil {
 		return nil, err
 	}

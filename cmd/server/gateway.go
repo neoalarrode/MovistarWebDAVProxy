@@ -9,10 +9,12 @@ import (
 	"net/url"
 	"path"
 	"strings"
+	"time"
 
 	"movistar-webdav-proxy/internal/cryptname"
 	"movistar-webdav-proxy/internal/logger"
 	"movistar-webdav-proxy/internal/rclonesvc"
+	"movistar-webdav-proxy/internal/sapi"
 	"movistar-webdav-proxy/internal/vault"
 	"movistar-webdav-proxy/internal/webdav"
 )
@@ -26,7 +28,14 @@ type decryptedGateway struct {
 	upstream *httputil.ReverseProxy
 	raw      *webdav.Server
 	svc      *rclonesvc.Service
+	// onNetChange se llama cuando la máquina avisa de un cambio de red (cable ↔
+	// Wi-Fi) por networkChangePath; via es «cable» o «wifi».
+	onNetChange func(via string)
 }
+
+// networkChangePath recibe el aviso de cambio de red del script de la máquina
+// (/usr/local/sbin/wifi-respaldo): dentro de Docker el proxy no ve las tarjetas.
+const networkChangePath = "/.red-cambio"
 
 func newDecryptedGateway(rcloneAddr string, raw *webdav.Server, svc *rclonesvc.Service) *decryptedGateway {
 	target, _ := url.Parse("http://" + rcloneAddr)
@@ -51,6 +60,10 @@ const clientCopyPath = "/.nube-estado"
 func (g *decryptedGateway) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	if r.URL.Path == clientCopyPath {
 		g.clientCopy(w, r)
+		return
+	}
+	if r.URL.Path == networkChangePath {
+		g.networkChange(w, r)
 		return
 	}
 	if len(vault.Folders()) == 0 {
@@ -126,8 +139,11 @@ func (g *decryptedGateway) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	// ya guarda la fecha de X-OC-Mtime, y olvidar un archivo le hace releer la carpeta
 	// entera (y el chunker, los metadatos de cada archivo) en cada subida.
 	if r.Method == http.MethodPut {
-		// Una subida fallida se apunta en la copia del cliente a la que pertenece.
-		sw := &statusWriter{ResponseWriter: w}
+		// Una subida fallida se apunta en la copia del cliente a la que pertenece. Si
+		// falla tras un cambio de red (se cortaron las conexiones con Movistar), se
+		// responde 503 con Retry-After: rclone lo trata como temporal y vuelve a mandar
+		// el archivo entero en vez de darlo por fallido.
+		sw := &statusWriter{ResponseWriter: w, retryAfterNetChange: true}
 		g.upstream.ServeHTTP(sw, r)
 		if sw.status >= 400 {
 			webdav.RecordUploadFailure(r.URL.Path, fmt.Sprintf("%d %s", sw.status, http.StatusText(sw.status)))
@@ -137,22 +153,40 @@ func (g *decryptedGateway) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	g.upstream.ServeHTTP(w, r)
 }
 
-// statusWriter guarda el código de respuesta.
+// netChangeRetryWindow: tras un cambio de red, los errores de subida se devuelven como
+// 503 (reintentable) durante este tiempo.
+const netChangeRetryWindow = 3 * time.Minute
+
+// statusWriter guarda el código de respuesta. Con retryAfterNetChange, un error justo
+// después de un cambio de red se sustituye por 503 + Retry-After (y se descarta el
+// cuerpo del error original).
 type statusWriter struct {
 	http.ResponseWriter
-	status int
+	status              int
+	retryAfterNetChange bool
+	swallow             bool
 }
 
 func (s *statusWriter) WriteHeader(code int) {
-	if s.status == 0 {
-		s.status = code
+	if s.status != 0 {
+		return
+	}
+	s.status = code
+	if s.retryAfterNetChange && code >= 400 && code != http.StatusUnauthorized && sapi.NetworkChangedWithin(netChangeRetryWindow) {
+		s.swallow = true
+		s.ResponseWriter.Header().Set("Retry-After", "5")
+		http.Error(s.ResponseWriter, "Cambio de red: reintenta la subida", http.StatusServiceUnavailable)
+		return
 	}
 	s.ResponseWriter.WriteHeader(code)
 }
 
 func (s *statusWriter) Write(b []byte) (int, error) {
 	if s.status == 0 {
-		s.status = http.StatusOK
+		s.WriteHeader(http.StatusOK)
+	}
+	if s.swallow {
+		return len(b), nil
 	}
 	return s.ResponseWriter.Write(b)
 }
@@ -161,6 +195,30 @@ func (s *statusWriter) Flush() {
 	if f, ok := s.ResponseWriter.(http.Flusher); ok {
 		f.Flush()
 	}
+}
+
+// networkChange atiende el aviso de cambio de red (POST con {"via": "cable"|"wifi"}).
+func (g *decryptedGateway) networkChange(w http.ResponseWriter, r *http.Request) {
+	if user, pass, ok := r.BasicAuth(); !ok || !g.svc.CheckAuth(user, pass) {
+		w.Header().Set("WWW-Authenticate", `Basic realm="WebDAV"`)
+		http.Error(w, "Unauthorized", http.StatusUnauthorized)
+		return
+	}
+	if r.Method != http.MethodPost {
+		http.Error(w, "POST", http.StatusMethodNotAllowed)
+		return
+	}
+	var body struct {
+		Via string `json:"via"`
+	}
+	_ = json.NewDecoder(http.MaxBytesReader(w, r.Body, 4096)).Decode(&body)
+	if body.Via != "wifi" {
+		body.Via = "cable"
+	}
+	if g.onNetChange != nil {
+		go g.onNetChange(body.Via)
+	}
+	w.WriteHeader(http.StatusNoContent)
 }
 
 // clientCopy guarda el estado de una copia de un cliente (POST con JSON, con las

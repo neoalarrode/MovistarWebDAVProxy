@@ -2,10 +2,13 @@ package main
 
 import (
 	"context"
+	"fmt"
 	"time"
 
+	"movistar-webdav-proxy/internal/logger"
 	"movistar-webdav-proxy/internal/notifier"
 	"movistar-webdav-proxy/internal/rclonesvc"
+	"movistar-webdav-proxy/internal/sapi"
 	"movistar-webdav-proxy/internal/vault"
 	"movistar-webdav-proxy/internal/webclient"
 	"movistar-webdav-proxy/internal/webdav"
@@ -72,5 +75,25 @@ func watchHealth(ctx context.Context, sess *webclient.Session, svc *rclonesvc.Se
 			}
 			webdav.SweepClientCopies(now)
 		}
+	}
+}
+
+// onNetworkChange: la máquina ha pasado del cable al Wi-Fi o al revés. Se cortan las
+// conexiones con Movistar (las subidas en curso fallan y el cliente las reintenta
+// enteras), se relanza el navegador de la sesión web y se avisa por Telegram.
+func onNetworkChange(via string, sess *webclient.Session) {
+	n := sapi.ResetConnections(via)
+	if sess != nil {
+		if err := sess.ResetNetwork(); err != nil {
+			logger.Log("[WebSession] ❌ No se pudo relanzar el navegador tras el cambio de red: %v", err)
+		}
+	}
+	if via == "wifi" {
+		_ = notifier.Alert("", "📶", "La Pi ha pasado al Wi-Fi",
+			"El cable no tiene conexión: todo sigue por Wi-Fi, más lento. Al volver el cable regresa sola.",
+			fmt.Sprintf("%d peticiones con Movistar reintentadas por la red nueva", n))
+	} else {
+		_ = notifier.Alert("", "🔌", "La Pi vuelve al cable",
+			"El cable tiene conexión otra vez: todo vuelve a ir por cable.", "")
 	}
 }

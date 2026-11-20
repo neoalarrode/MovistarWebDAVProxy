@@ -10,6 +10,7 @@ import (
 
 	"movistar-webdav-proxy/internal/config"
 	"movistar-webdav-proxy/internal/rclonesvc"
+	"movistar-webdav-proxy/internal/sapi"
 	"movistar-webdav-proxy/internal/vault"
 	"movistar-webdav-proxy/internal/webdav"
 )
@@ -84,5 +85,70 @@ func TestGatewayClientCopyReport(t *testing.T) {
 	g.ServeHTTP(httptest.NewRecorder(), req)
 	if len(webdav.ClientCopies(time.Minute)) != 0 {
 		t.Fatal("al terminar debe desaparecer")
+	}
+}
+
+// El aviso de cambio de red exige credenciales y llama al manejador con la vía.
+func TestGatewayNetworkChange(t *testing.T) {
+	got := make(chan string, 1)
+	g := newDecryptedGateway("127.0.0.1:1", nil, rclonesvc.New(rclonesvc.Options{User: "u", Pass: "p"}))
+	g.onNetChange = func(via string) { got <- via }
+	req := httptest.NewRequest(http.MethodPost, networkChangePath, strings.NewReader(`{"via":"wifi"}`))
+	rec := httptest.NewRecorder()
+	g.ServeHTTP(rec, req)
+	if rec.Code != http.StatusUnauthorized {
+		t.Fatalf("sin credenciales: %d", rec.Code)
+	}
+	req = httptest.NewRequest(http.MethodPost, networkChangePath, strings.NewReader(`{"via":"wifi"}`))
+	req.SetBasicAuth("u", "p")
+	rec = httptest.NewRecorder()
+	g.ServeHTTP(rec, req)
+	if rec.Code != http.StatusNoContent {
+		t.Fatalf("con credenciales: %d", rec.Code)
+	}
+	select {
+	case v := <-got:
+		if v != "wifi" {
+			t.Fatalf("vía: %q", v)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("no se llamó al manejador")
+	}
+}
+
+// Tras un cambio de red, una subida fallida se devuelve como 503 + Retry-After para que
+// rclone la vuelva a mandar entera; sin cambio de red, el error tal cual.
+func TestGatewayPutRetryableAfterNetworkChange(t *testing.T) {
+	old := config.TokensDir
+	config.TokensDir = t.TempDir()
+	t.Cleanup(func() { config.TokensDir = old })
+	if err := vault.LoadFolders(); err != nil {
+		t.Fatal(err)
+	}
+	conf := "[x-trozos]\ntype = chunker\nremote = nube:Fotos\n\n[x-cifrada]\ntype = crypt\nremote = x-trozos:\npassword = abc\n"
+	if _, err := vault.SaveFolder(vault.Folder{Name: "Fotos", Config: conf}); err != nil {
+		t.Fatal(err)
+	}
+	up := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Error(w, "conflicto", http.StatusConflict)
+	}))
+	defer up.Close()
+	g := newDecryptedGateway(strings.TrimPrefix(up.URL, "http://"), nil, rclonesvc.New(rclonesvc.Options{User: "u", Pass: "p"}))
+	put := func() *httptest.ResponseRecorder {
+		req := httptest.NewRequest(http.MethodPut, "/Fotos/a.jpg", strings.NewReader("x"))
+		req.SetBasicAuth("u", "p")
+		rec := httptest.NewRecorder()
+		g.ServeHTTP(rec, req)
+		return rec
+	}
+	if !sapi.NetworkChangedWithin(netChangeRetryWindow) {
+		if rec := put(); rec.Code != http.StatusConflict {
+			t.Fatalf("sin cambio de red: %d", rec.Code)
+		}
+	}
+	sapi.ResetConnections("prueba")
+	rec := put()
+	if rec.Code != http.StatusServiceUnavailable || rec.Header().Get("Retry-After") == "" || strings.Contains(rec.Body.String(), "conflicto") {
+		t.Fatalf("tras cambio de red: %d %q %q", rec.Code, rec.Header().Get("Retry-After"), rec.Body.String())
 	}
 }
