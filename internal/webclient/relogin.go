@@ -50,6 +50,12 @@ func (s *Session) reloginTab() (context.Context, error) {
 		return nil, err
 	}
 	tab, cancel := chromedp.NewContext(main, chromedp.WithNewBrowserContext())
+	// La pestaña se crea con el contexto propio, sin plazo: si la primera acción va con
+	// un contexto con plazo, chromedp ata la pestaña a él y la cierra al vencer.
+	if err := chromedp.Do(tab); err != nil {
+		cancel()
+		return nil, err
+	}
 	ctx, c2 := context.WithTimeout(tab, 60*time.Second)
 	defer c2()
 	if err := chromedp.Do(ctx, chromedp.Navigate(PortalURL+"/login")); err != nil {
