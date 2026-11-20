@@ -169,6 +169,8 @@ func (s *Server) Routes() http.Handler {
 	mux.HandleFunc("/unlink", s.handleUnlink)
 	mux.HandleFunc("/test_telegram", s.handleTestTelegram)
 	mux.HandleFunc("/save_telegram", s.handleSaveTelegram)
+	mux.HandleFunc("/telegram_status", s.handleTelegramStatus)
+	mux.HandleFunc("/telegram_detect_chat", s.handleTelegramDetectChat)
 	mux.HandleFunc("/api/diagnostic/compare", s.handleDiagnosticCompare)
 	mux.HandleFunc("/diagnostic/compare", s.handleDiagnosticCompare)
 	if s.webLogin != nil {
@@ -1171,8 +1173,7 @@ func (s *Server) handleTestTelegram(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	s.notifier.UpdateCredentials(botToken, chatID)
-	if err := s.notifier.SendTestAlert(cfg.Provider); err != nil {
+	if err := notifier.SendTestWith(botToken, chatID, cfg.Provider); err != nil {
 		jsonResponse(w, http.StatusBadRequest, map[string]interface{}{
 			"status":  "error",
 			"message": err.Error(),
@@ -1180,6 +1181,59 @@ func (s *Server) handleTestTelegram(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	jsonResponse(w, http.StatusOK, map[string]interface{}{"status": "ok"})
+}
+
+// handleTelegramStatus: si Telegram está configurado (token enmascarado), para el panel.
+func (s *Server) handleTelegramStatus(w http.ResponseWriter, r *http.Request) {
+	token, chat := notifier.Default.Credentials()
+	on, lastAt, lastErr := notifier.Default.Status()
+	jsonResponse(w, http.StatusOK, map[string]interface{}{"status": "ok", "telegram_configured": on,
+		"telegram_token_masked": logger.Mask(token), "telegram_chat_id": chat, "last_sent": lastAt, "last_error": lastErr})
+}
+
+// handleTelegramDetectChat busca los chats que han escrito al bot (tras /start).
+func (s *Server) handleTelegramDetectChat(w http.ResponseWriter, r *http.Request) {
+	var body struct {
+		BotToken string `json:"bot_token"`
+	}
+	if !decodeJSONBody(w, r, &body) {
+		return
+	}
+	token := strings.TrimSpace(body.BotToken)
+	if token == "" || strings.Contains(token, "…") || strings.Contains(token, "****") {
+		token, _ = notifier.Default.Credentials()
+	}
+	if !config.ValidateBotToken(token) {
+		jsonResponse(w, http.StatusBadRequest, map[string]interface{}{"status": "error", "message": "Pon primero el token del bot"})
+		return
+	}
+	chats, err := notifier.DetectChats(token)
+	if err != nil {
+		jsonResponse(w, http.StatusBadGateway, map[string]interface{}{"status": "error", "message": err.Error()})
+		return
+	}
+	jsonResponse(w, http.StatusOK, map[string]interface{}{"status": "ok", "chats": chats})
+}
+
+// saveTelegramWeb guarda Telegram en la configuración del proxy (modo web, sin cuenta
+// por teléfono). Un token vacío o enmascarado conserva el actual.
+func (s *Server) saveTelegramWeb(w http.ResponseWriter, token, chat string) {
+	if cur, _ := notifier.Default.Credentials(); token == "" || strings.Contains(token, "…") || strings.Contains(token, "****") {
+		token = cur
+	}
+	if !config.ValidateBotToken(token) {
+		jsonResponse(w, http.StatusBadRequest, map[string]interface{}{"status": "error", "message": "Formato de Token de Telegram inválido (esperado: 123456:ABC-DEF...)"})
+		return
+	}
+	if !config.ValidateChatID(chat) {
+		jsonResponse(w, http.StatusBadRequest, map[string]interface{}{"status": "error", "message": "Formato de Chat ID inválido (esperado: ID numérico o @canal)"})
+		return
+	}
+	if err := notifier.SaveStored(token, chat); err != nil {
+		jsonResponse(w, http.StatusInternalServerError, map[string]interface{}{"status": "error", "message": "No se pudo guardar: " + err.Error()})
+		return
+	}
 	jsonResponse(w, http.StatusOK, map[string]interface{}{"status": "ok"})
 }
 
@@ -1194,6 +1248,10 @@ func (s *Server) handleSaveTelegram(w http.ResponseWriter, r *http.Request) {
 	}
 
 	phone := config.SanitizePhone(body.Phone)
+	if phone == "" && config.WebSessionEnabled() {
+		s.saveTelegramWeb(w, strings.TrimSpace(body.BotToken), strings.TrimSpace(body.ChatID))
+		return
+	}
 	if phone == "" {
 		if activeCfg := s.client.GetConfig(); activeCfg.Phone != "" {
 			phone = activeCfg.Phone

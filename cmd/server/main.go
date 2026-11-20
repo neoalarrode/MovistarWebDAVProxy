@@ -61,6 +61,8 @@ func main() {
 	if cfg.TelegramBotToken != "" && cfg.TelegramChatID != "" {
 		notifier.Default.UpdateCredentials(cfg.TelegramBotToken, cfg.TelegramChatID)
 	}
+	// La configuración propia del proxy (modo web, guardada desde el panel) manda.
+	notifier.LoadStored()
 
 	if config.WebSessionEnabled() {
 		// El modo de autenticación se anuncia al iniciar la sesión web.
@@ -251,6 +253,7 @@ func main() {
 	// avisará por telegram si OnSessionExpired, al cargas notificaciones
 	uiServer := webui.NewServerWithAuth(client, webdavServer, uiAuth)
 	cryptSvc := setupCrypt(webdavPort, rawPort)
+	go watchHealth(ctx, webSess, cryptSvc)
 	defer cryptSvc.Stop()
 	pubHTTP := &http.Server{
 		Addr:              ":" + webdavPort,

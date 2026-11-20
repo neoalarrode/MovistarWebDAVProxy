@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"fmt"
 	"os"
 	"strings"
 	"sync"
@@ -10,6 +11,7 @@ import (
 	"movistar-webdav-proxy/internal/autochunk"
 	"movistar-webdav-proxy/internal/cryptname"
 	"movistar-webdav-proxy/internal/logger"
+	"movistar-webdav-proxy/internal/notifier"
 	"movistar-webdav-proxy/internal/rcloneconf"
 	"movistar-webdav-proxy/internal/rclonesvc"
 	"movistar-webdav-proxy/internal/sapi"
@@ -126,6 +128,8 @@ func setupAutoChunk(svc *rclonesvc.Service) {
 		c := autochunk.Chunk()
 		if c > 0 {
 			logger.Log("[Descifrado] ✂️ Movistar rechaza las subidas grandes (MED-1048): trozos de %d MiB a partir de ahora", c>>20)
+			_ = notifier.Alert(fmt.Sprintf("autochunk_%d", c>>20), "✂️", "Movistar ha bajado el tamaño máximo de subida",
+				fmt.Sprintf("Movistar rechaza archivos grandes (MED-1048). El proxy sube ahora en trozos de %d MiB; lo ya subido se sigue leyendo igual.", c>>20), "")
 		} else {
 			logger.Log("[Descifrado] ✂️ Tamaño de trozo restablecido al de la configuración")
 		}

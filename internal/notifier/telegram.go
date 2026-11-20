@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"html"
 	"io"
 	"net/http"
 	"net/url"
@@ -22,11 +23,14 @@ type TelegramNotifier struct {
 	client   *http.Client
 	mu       sync.Mutex
 
-	lastNotificationAt   time.Time
+	lastNotificationAt time.Time
 	//lastSessionExpiredAt time.Time
-	lastAlerts         map[string]time.Time // <--- CAMBIADO (antes lastSessionExpiredAt)
-	lastError            string
+	lastAlerts map[string]time.Time // <--- CAMBIADO (antes lastSessionExpiredAt)
+	lastError  string
 }
+
+// apiBase es la API de Telegram (variable para los tests).
+var apiBase = "https://api.telegram.org"
 
 // Default es la instancia global compartida por toda la aplicación.
 var Default *TelegramNotifier
@@ -69,7 +73,6 @@ func NewTelegramNotifier(botToken, chatID string) *TelegramNotifier {
 	return Default
 }
 
-
 func (t *TelegramNotifier) IsConfigured() bool {
 	t.mu.Lock()
 	defer t.mu.Unlock()
@@ -88,7 +91,7 @@ func (t *TelegramNotifier) UpdateCredentials(botToken, chatID string) {
 	if chat == "" {
 		chat = strings.TrimSpace(os.Getenv("TELEGRAM_CHAT_ID"))
 	}
-	
+
 	t.mu.Lock()
 	defer t.mu.Unlock()
 	t.botToken = token
@@ -120,7 +123,14 @@ func sanitizeTransportError(err error, token string) string {
 	return msg
 }
 
-func (t *TelegramNotifier) SendMessage(text string) error {
+// SendMessage envía texto tal cual (sin formato).
+func (t *TelegramNotifier) SendMessage(text string) error { return t.send(text, false) }
+
+// sendHTML envía con formato HTML de Telegram: el texto dinámico tiene que ir
+// escapado (html.EscapeString), si no Telegram rechaza el mensaje.
+func (t *TelegramNotifier) sendHTML(text string) error { return t.send(text, true) }
+
+func (t *TelegramNotifier) send(text string, asHTML bool) error {
 	t.mu.Lock()
 	token := t.botToken
 	chatID := t.chatID
@@ -137,13 +147,16 @@ func (t *TelegramNotifier) SendMessage(text string) error {
 			"is_disabled": true,
 		},
 	}
+	if asHTML {
+		payload["parse_mode"] = "HTML"
+	}
 
 	bodyBytes, err := json.Marshal(payload)
 	if err != nil {
 		return err
 	}
 
-	apiURL := fmt.Sprintf("https://api.telegram.org/bot%s/sendMessage", token)
+	apiURL := fmt.Sprintf("%s/bot%s/sendMessage", apiBase, token)
 	req, err := http.NewRequest("POST", apiURL, bytes.NewReader(bodyBytes))
 	if err != nil {
 		return fmt.Errorf("error preparando petición a Telegram")
@@ -200,14 +213,14 @@ func (t *TelegramNotifier) SendSessionExpiredAlert(provider, phone, details stri
 	}
 
 	msg := fmt.Sprintf(
-		"⚠️ *Sesión de %s caducada*\n\n"+
-			"El Proxy WebDAV no puede acceder a tus archivos porque la sesión para la línea *%s* ha expirado.\n\n"+
+		"⚠️ <b>Sesión de %s caducada</b>\n\n"+
+			"El Proxy WebDAV no puede acceder a tus archivos porque la sesión para la línea <b>%s</b> ha expirado.\n\n"+
 			"Detalle: %s\n"+
 			"Hora: %s\n\n"+
 			"Por favor, abre el panel Web para revincular tu dispositivo.",
-		providerName, logger.Mask(phone), details, time.Now().Format("2006-01-02 15:04:05"),
+		html.EscapeString(providerName), html.EscapeString(logger.Mask(phone)), html.EscapeString(details), time.Now().Format("2006-01-02 15:04:05"),
 	)
-	return t.SendMessage(msg)
+	return t.sendHTML(msg)
 }
 
 func (t *TelegramNotifier) SendTestAlert(provider string) error {
@@ -217,13 +230,12 @@ func (t *TelegramNotifier) SendTestAlert(provider string) error {
 	}
 
 	msg := fmt.Sprintf(
-		"🔔 *Notificaciones WebDAV de %s activas*\n\n"+
+		"🔔 <b>Notificaciones WebDAV de %s activas</b>\n\n"+
 			"El Gateway WebDAV está conectado con Telegram y listo para avisarte ante cualquier evento o expiración de sesión.",
-		providerName,
+		html.EscapeString(providerName),
 	)
-	return t.SendMessage(msg)
+	return t.sendHTML(msg)
 }
-
 
 // Para que se use de forma global
 // Send envía un mensaje directo usando el notificador global.
@@ -261,19 +273,18 @@ func (t *TelegramNotifier) SendAlert(alertKey, icon, title, description, details
 	if strings.TrimSpace(icon) == "" {
 		icon = "⚠️"
 	}
-	
+
 	var sb strings.Builder
-	sb.WriteString(fmt.Sprintf("%s *%s*\n\n", icon, title))
-	sb.WriteString(fmt.Sprintf("%s\n\n", description))
+	sb.WriteString(fmt.Sprintf("%s <b>%s</b>\n\n", icon, html.EscapeString(title)))
+	sb.WriteString(fmt.Sprintf("%s\n\n", html.EscapeString(description)))
 
 	if details != "" {
-		sb.WriteString(fmt.Sprintf("Detalle: %s\n", details))
+		sb.WriteString(fmt.Sprintf("Detalle: %s\n", html.EscapeString(details)))
 	}
 	sb.WriteString(fmt.Sprintf("Hora: %s", time.Now().Format("2006-01-02 15:04:05")))
 
-	return t.SendMessage(sb.String())
+	return t.sendHTML(sb.String())
 }
-
 
 // Credentials devuelve el token y chatID activos actualmente en memoria.
 func (t *TelegramNotifier) Credentials() (string, string) {
@@ -282,3 +293,63 @@ func (t *TelegramNotifier) Credentials() (string, string) {
 	return t.botToken, t.chatID
 }
 
+// SendTestWith manda el mensaje de prueba con unas credenciales concretas sin
+// cambiar las activas (probar no debe dejar puesto lo que no se ha guardado).
+func SendTestWith(botToken, chatID, provider string) error {
+	t := &TelegramNotifier{botToken: strings.TrimSpace(botToken), chatID: strings.TrimSpace(chatID),
+		client: &http.Client{Timeout: 10 * time.Second}, lastAlerts: map[string]time.Time{}}
+	return t.SendTestAlert(provider)
+}
+
+// DetectedChat es un chat que ha escrito al bot (para no tener que buscar el ID a mano).
+type DetectedChat struct {
+	ID    int64  `json:"id"`
+	Title string `json:"title"`
+}
+
+// DetectChats pide a Telegram los mensajes recientes del bot y devuelve los chats que
+// le han escrito (p. ej. tras mandarle /start).
+func DetectChats(botToken string) ([]DetectedChat, error) {
+	token := strings.TrimSpace(botToken)
+	client := &http.Client{Timeout: 10 * time.Second}
+	resp, err := client.Get(fmt.Sprintf("%s/bot%s/getUpdates", apiBase, token))
+	if err != nil {
+		return nil, fmt.Errorf("error de red contactando con Telegram: %s", sanitizeTransportError(err, token))
+	}
+	defer resp.Body.Close()
+	var out struct {
+		OK          bool   `json:"ok"`
+		Description string `json:"description"`
+		Result      []struct {
+			Message *struct {
+				Chat struct {
+					ID        int64  `json:"id"`
+					Title     string `json:"title"`
+					FirstName string `json:"first_name"`
+					Username  string `json:"username"`
+				} `json:"chat"`
+			} `json:"message"`
+		} `json:"result"`
+	}
+	if err := json.NewDecoder(io.LimitReader(resp.Body, 1<<20)).Decode(&out); err != nil {
+		return nil, fmt.Errorf("respuesta de Telegram no válida")
+	}
+	if !out.OK {
+		return nil, fmt.Errorf("Telegram: %s", out.Description)
+	}
+	seen := map[int64]bool{}
+	var chats []DetectedChat
+	for _, u := range out.Result {
+		if u.Message == nil || seen[u.Message.Chat.ID] {
+			continue
+		}
+		c := u.Message.Chat
+		seen[c.ID] = true
+		title := c.Title
+		if title == "" {
+			title = strings.TrimSpace(c.FirstName + " @" + c.Username)
+		}
+		chats = append(chats, DetectedChat{ID: c.ID, Title: title})
+	}
+	return chats, nil
+}

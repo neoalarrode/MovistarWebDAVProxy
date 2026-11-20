@@ -405,7 +405,11 @@
                 </div>
                 <div>
                     <label class="block font-semibold text-slate-700 mb-1">Chat ID</label>
-                    <input type="text" id="tg-chat-input" placeholder="Ej: 123456789" class="w-full bg-slate-50 border border-slate-200 rounded-xl px-3 py-2 font-mono text-slate-800 outline-none focus:border-sky-500">
+                    <div class="flex gap-2">
+                        <input type="text" id="tg-chat-input" placeholder="Ej: 123456789" class="flex-1 min-w-0 bg-slate-50 border border-slate-200 rounded-xl px-3 py-2 font-mono text-slate-800 outline-none focus:border-sky-500">
+                        <button type="button" onclick="detectTelegramChat()" id="tg-detect-btn" class="px-3 py-2 bg-slate-100 hover:bg-slate-200 text-slate-700 rounded-xl font-semibold border border-slate-200 whitespace-nowrap">Detectar mi chat</button>
+                    </div>
+                    <p class="text-[11px] text-slate-500 mt-1">Manda <span class="font-mono">/start</span> a tu bot desde Telegram y pulsa «Detectar mi chat».</p>
                 </div>
 
                 <div class="flex space-x-2 pt-2">
@@ -498,6 +502,7 @@
             fetchLogs();
             logInterval = setInterval(fetchLogs, 2000);
             initWebMode();
+            loadTelegramState();
             refreshCrypt();
             setInterval(refreshCrypt, 15000);
         });
@@ -980,19 +985,7 @@
                         localStorage.setItem('mc_provider', data.provider);
                         updateProviderUI();
                     }
-                    if (data.telegram_configured) {
-                        const tgLabel = document.getElementById('telegram-status-label');
-                        if (tgLabel) tgLabel.textContent = 'Telegram (Activo)';
-                    }
-                    const tgTok = document.getElementById('tg-token-input');
-                    if (tgTok) {
-                        tgTok.value = '';
-                        tgTok.placeholder = data.telegram_token_masked ? `Configurado (${data.telegram_token_masked}) — deja vacío para mantener` : '123456789:ABCdefGHIjklMNOpqrsTUVwxyz';
-                    }
-                    if (data.telegram_chat_id) {
-                        const tgChat = document.getElementById('tg-chat-input');
-                        if (tgChat) tgChat.value = data.telegram_chat_id;
-                    }
+                    showTelegramState(data);
                     if (data.has_credentials || data.has_device_token) {
                         loadStorageInfo(phone);
                     } else {
@@ -1297,6 +1290,38 @@
             document.getElementById('telegramModal').classList.remove('hidden');
         }
 
+        // Estado de Telegram en la cabecera y en el formulario (con o sin cuenta por teléfono).
+        function showTelegramState(data) {
+            const tgLabel = document.getElementById('telegram-status-label');
+            if (tgLabel) tgLabel.textContent = data.telegram_configured ? 'Telegram (Activo)' : 'Telegram';
+            const tgTok = document.getElementById('tg-token-input');
+            if (tgTok) {
+                tgTok.value = '';
+                tgTok.placeholder = data.telegram_token_masked ? `Configurado (${data.telegram_token_masked}) — deja vacío para mantener` : '123456789:ABCdefGHIjklMNOpqrsTUVwxyz';
+            }
+            const tgChat = document.getElementById('tg-chat-input');
+            if (tgChat && data.telegram_chat_id) tgChat.value = data.telegram_chat_id;
+        }
+        async function loadTelegramState() {
+            try { const d = await (await fetch('/telegram_status')).json(); if (d.status === 'ok') showTelegramState(d); } catch (e) {}
+        }
+
+        async function detectTelegramChat() {
+            const btn = document.getElementById('tg-detect-btn');
+            btn.disabled = true;
+            try {
+                const res = await fetch('/telegram_detect_chat', {method: 'POST', headers: {'Content-Type': 'application/json'},
+                    body: JSON.stringify({bot_token: document.getElementById('tg-token-input').value.trim()})});
+                const data = await res.json();
+                if (data.status !== 'ok') { showToast(data.message || 'No se pudo consultar Telegram', 'error'); return; }
+                const chats = data.chats || [];
+                if (!chats.length) { showToast('Aún no hay mensajes: manda /start a tu bot y vuelve a pulsar', 'error'); return; }
+                document.getElementById('tg-chat-input').value = chats[chats.length - 1].id;
+                showToast('Chat detectado: ' + chats[chats.length - 1].title, 'success');
+            } catch (e) { showToast('Error de red contactando servidor', 'error'); }
+            finally { btn.disabled = false; }
+        }
+
         function closeTelegramModal() {
             document.getElementById('telegramModal').classList.add('hidden');
         }
@@ -1344,8 +1369,7 @@
                 const data = await res.json();
                 if (data.status === 'ok') {
                     showToast('Ajustes de Telegram guardados.', 'success');
-                    const tgLabel = document.getElementById('telegram-status-label');
-                    if (tgLabel) tgLabel.textContent = token && chat ? 'Telegram (Activo)' : 'Telegram';
+                    loadTelegramState();
                     closeTelegramModal();
                 } else {
                     showToast(data.message || 'Error al guardar ajustes', 'error');

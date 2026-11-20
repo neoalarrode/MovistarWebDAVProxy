@@ -147,6 +147,7 @@ func NewServerWithAuth(client *sapi.Client, authCfg config.AuthConfig, metaStore
 		Logger: func(r *http.Request, err error) {
 			if err != nil && !errors.Is(err, ErrUploadTooLarge) && !isExpectedNotFound(r.Method, err) {
 				logger.Log("[WebDAV] ❌ Error en %s %s: %v", r.Method, r.URL.Path, err)
+				noteRequestError(r.Method, err, time.Now())
 			}
 		},
 	}
