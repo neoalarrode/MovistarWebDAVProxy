@@ -8,6 +8,7 @@ package rclonesvc
 import (
 	"bufio"
 	"context"
+	"crypto/subtle"
 	"fmt"
 	"io"
 	"net"
@@ -383,7 +384,10 @@ func (s *Service) CheckAuth(user, pass string) bool {
 	if s.opts.User == "" {
 		return true
 	}
-	return user == s.opts.User && pass == s.opts.Pass
+	// En tiempo constante, para no dar pistas de la contraseña por lo que tarda.
+	u := subtle.ConstantTimeCompare([]byte(user), []byte(s.opts.User))
+	p := subtle.ConstantTimeCompare([]byte(pass), []byte(s.opts.Pass))
+	return u&p == 1
 }
 
 // WaitReady espera (hasta 60 s) a que el WebDAV interno acepte conexiones.

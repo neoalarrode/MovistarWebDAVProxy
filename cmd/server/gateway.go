@@ -47,6 +47,14 @@ func (g *decryptedGateway) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		g.raw.ServeHTTP(w, r)
 		return
 	}
+	// Las credenciales se comprueban antes de nada: lo de abajo anota en el WebDAV en
+	// bruto tamaños y fechas esperados por ruta, y una petición sin credenciales no
+	// debe poder tocar los de una subida legítima en curso.
+	if user, pass, ok := r.BasicAuth(); !ok || !g.svc.CheckAuth(user, pass) {
+		w.Header().Set("WWW-Authenticate", `Basic realm="WebDAV"`)
+		http.Error(w, "Unauthorized", http.StatusUnauthorized)
+		return
+	}
 	if r.Method == "MKCOL" {
 		clean := strings.Trim(path.Clean("/"+r.URL.Path), "/")
 		if clean != "" && !strings.Contains(clean, "/") {
@@ -141,12 +149,6 @@ func rawPathFor(p string) (string, bool) {
 }
 
 func (g *decryptedGateway) mkdirRoot(w http.ResponseWriter, r *http.Request, name string) {
-	// La autenticación la comprueba el WebDAV en bruto con las mismas credenciales.
-	if user, pass, ok := r.BasicAuth(); !ok || !g.svc.CheckAuth(user, pass) {
-		w.Header().Set("WWW-Authenticate", `Basic realm="WebDAV"`)
-		http.Error(w, "Unauthorized", http.StatusUnauthorized)
-		return
-	}
 	fs := g.raw.FS()
 	if fs == nil {
 		http.Error(w, "no disponible", http.StatusServiceUnavailable)
