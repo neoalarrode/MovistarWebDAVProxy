@@ -210,10 +210,12 @@ func readCopyStatusWith(dir, controlDir string, reads *readTracker) copyStatus {
 	st.Enabled = true
 	if dir == "" {
 		fillFromProxy(&st)
+		applyClientCopies(&st)
 		return st
 	}
 	if _, err := os.Stat(dir); err != nil {
 		fillFromProxy(&st)
+		applyClientCopies(&st)
 		return st
 	}
 

@@ -16,6 +16,10 @@ func TestApplyClientCopies(t *testing.T) {
 	if st.Current != "Disney+/Serie" || st.Percent != "25" || st.ETA == "" || st.ErrorCount != 1 || st.Total == "" {
 		t.Fatalf("cabecera: %+v", st)
 	}
+	// Sin carpeta de registros del script (como en la Pi), también.
+	if st2 := readCopyStatusWith("", "", nil); st2.Current != "Disney+/Serie" {
+		t.Fatalf("sin COPY_STATUS_DIR: %+v", st2.Current)
+	}
 	st = copyStatus{Current: "Peliculas"}
 	applyClientCopies(&st)
 	if st.Current != "Peliculas" {
