@@ -325,10 +325,10 @@ def draw_session(win, y, x, h, w, sess, cstat, storage, crypt):
             sig = wf.get("signal")
             col = C_OK if sig is not None and sig >= -60 else (C_WARN if sig is not None and sig >= -70 else C_BAD)
             estado = "en uso" if via == "wifi" else "reserva"
-            enlace = f"{max(wf.get('rx', 0), wf.get('tx', 0)):.0f} Mbit/s"
-            banda = ("5 GHz" if wf["ghz"] > 4 else "2,4 GHz") if wf.get("ghz") else ""
-            señal = f"{sig} dBm" if sig is not None else "?"
-            row(win, cy + 9, cx, cw, "Wi-Fi", " · ".join(p for p in (f"● {estado}", señal, enlace, banda) if p), curses.color_pair(col))
+            enlace = f"{max(wf.get('rx', 0), wf.get('tx', 0)):.0f}Mb/s"
+            banda = ("5GHz" if wf["ghz"] > 4 else "2,4GHz") if wf.get("ghz") else ""
+            señal = f"{sig}dBm" if sig is not None else "?"
+            row(win, cy + 9, cx, cw, "Wi-Fi", " ".join(p for p in (f"● {estado}", señal, enlace, banda) if p), curses.color_pair(col))
     if via == "cable":
         row(win, cy + 8, cx, cw, "Conexión", f"● Cable  {detail}".rstrip(), curses.color_pair(C_OK))
     elif via == "wifi":
