@@ -131,6 +131,42 @@ def smb_clients():
         return None
 
 
+def net_status():
+    """Conexión que usa la Pi: la ruta por defecto de menor métrica (cable o Wi-Fi)."""
+    best = None
+    try:
+        with open("/proc/net/route") as f:
+            for line in f.readlines()[1:]:
+                p = line.split()
+                if len(p) > 6 and p[1] == "00000000" and int(p[3], 16) & 1:  # por defecto y activa
+                    metric = int(p[6])
+                    if best is None or metric < best[1]:
+                        best = (p[0], metric)
+    except OSError:
+        return None, ""
+    if best is None:
+        return None, "sin conexión"
+    dev = best[0]
+    if dev.startswith("wl"):
+        sig = ""
+        try:
+            with open("/proc/net/wireless") as f:
+                for line in f:
+                    if line.strip().startswith(dev + ":"):
+                        sig = f"señal {float(line.split()[3].rstrip('.')):.0f} dBm"
+        except (OSError, ValueError, IndexError):
+            pass
+        return "wifi", sig
+    speed = ""
+    try:
+        with open(f"/sys/class/net/{dev}/speed") as f:
+            mbps = int(f.read().strip())
+            speed = f"{mbps // 1000} Gbit/s" if mbps >= 1000 else f"{mbps} Mbit/s"
+    except (OSError, ValueError):
+        pass
+    return "cable", speed
+
+
 def human(n, per_s=False):
     if n is None:
         return "?"
@@ -256,6 +292,13 @@ def draw_session(win, y, x, h, w, sess, cstat, storage, crypt):
         curses.color_pair(C_WARN if chunk else C_OK))
     if cstat is not None:
         row(win, cy + 7, cx, cw, "Límite subida", cstat.get("bwlimit") or "off")
+    via, detail = net_status()
+    if via == "cable":
+        row(win, cy + 8, cx, cw, "Conexión", f"● Cable  {detail}".rstrip(), curses.color_pair(C_OK))
+    elif via == "wifi":
+        row(win, cy + 8, cx, cw, "Conexión", f"● Wi-Fi (sin cable)  {detail}".rstrip(), curses.color_pair(C_WARN) | curses.A_BOLD)
+    else:
+        row(win, cy + 8, cx, cw, "Conexión", f"● {detail or '?'}", curses.color_pair(C_BAD) | curses.A_BOLD)
 
 
 def draw_system(win, y, x, h, w):
@@ -309,6 +352,36 @@ def transfer_line(t, w):
     if len(name) > nw:
         name = "…" + name[-(nw - 1):]
     return name, pct, right, nw
+
+
+def draw_copy(win, y, x, h, w, cstat):
+    """Progreso general de la copia que manda el rclone del cliente (Enviar a > Nube)."""
+    c = cstat or {}
+    box(win, y, x, h, w, "Copia en curso (rclone)")
+    cx, cy, cw = x + 2, y + 1, w - 4
+    cur = c.get("current")
+    if not cur:
+        put(win, cy, cx, "Sin copia en curso.", curses.color_pair(C_DIM))
+        return
+    try:
+        pct = int(c.get("percent") or 0)
+    except ValueError:
+        pct = 0
+    put(win, cy, cx, cur, curses.A_BOLD, cw)
+    right = f" {pct:3d}%"
+    bw = max(cw - len(right) - 1, 6)
+    put(win, cy + 1, cx, bar(pct, bw), curses.color_pair(C_ACC))
+    put(win, cy + 1, cx + bw, right, curses.color_pair(C_ACC) | curses.A_BOLD)
+    parts = []
+    if c.get("transferred"):
+        parts.append(f"{c.get('transferred')} de {c.get('total', '?')}")
+    if c.get("speed"):
+        parts.append(c["speed"])
+    if c.get("eta"):
+        parts.append(f"quedan {c['eta']}")
+    errs = c.get("error_count") or 0
+    parts.append(f"{errs} errores")
+    put(win, cy + 2, cx, "   ·   ".join(parts), curses.color_pair(C_BAD if errs else C_DIM), cw)
 
 
 def draw_activity(win, y, x, h, w, cstat):
@@ -385,6 +458,10 @@ def main(stdscr):
             draw_session(stdscr, top, 0, top_h, W, sess, cstat, storage, crypt)
             draw_system(stdscr, top + top_h, 0, top_h, W)
             y = top + 2 * top_h
+        copy_h = 5
+        if H - y >= copy_h + 6:
+            draw_copy(stdscr, y, 0, copy_h, W, cstat)
+            y += copy_h
         act_h = max(min(8, H - y - 3), 3)
         draw_activity(stdscr, y, 0, act_h, W, cstat)
         y += act_h
