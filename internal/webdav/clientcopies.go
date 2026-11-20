@@ -40,6 +40,37 @@ type destTotals struct {
 	bytes       int64
 	errors      int
 	first, last time.Time // primer y último informe de esa carpeta (su duración)
+	failed      []string  // subidas que fallaron en el proxy: «ruta: motivo»
+	failedMore  int       // fallos que no caben en failed
+}
+
+// copyFailedMax: fallos que se listan por carpeta en el aviso.
+const copyFailedMax = 10
+
+// RecordUploadFailure apunta una subida fallida en la carpeta de la copia en curso a la
+// que pertenece (la ruta contiene «/<carpeta enviada>/»). rclone solo da el número de
+// errores; así el aviso dice cuáles fueron.
+func RecordUploadFailure(path, reason string) {
+	p := "/" + strings.Trim(path, "/")
+	clientCopies.Lock()
+	defer clientCopies.Unlock()
+	for _, run := range clientCopies.m {
+		for _, d := range run.dests {
+			i := strings.Index(p, "/"+strings.Trim(d, "/")+"/")
+			if d == "" || i < 0 {
+				continue
+			}
+			t := run.perDest[d]
+			rel := p[i+len(d)+2:]
+			if len(t.failed) < copyFailedMax {
+				t.failed = append(t.failed, rel+": "+reason)
+			} else {
+				t.failedMore++
+			}
+			run.perDest[d] = t
+			return
+		}
+	}
 }
 
 var clientCopies struct {
@@ -140,6 +171,12 @@ func copySummary(run *copyRun, finished bool, now time.Time) (title, desc string
 			fmt.Fprintf(&b, " · media %s/s", copySize(float64(t.bytes)/secs))
 		}
 		fmt.Fprintf(&b, " · %d errores", t.errors)
+		for _, f := range t.failed {
+			fmt.Fprintf(&b, "\n⚠️ %s", f)
+		}
+		if t.failedMore > 0 {
+			fmt.Fprintf(&b, "\n… y %d fallos más", t.failedMore)
+		}
 	}
 	if len(run.dests) > 1 {
 		fmt.Fprintf(&b, "\n\nTotal: %s en %s", copySize(float64(bytes)), copyDuration(now.Sub(run.started)))

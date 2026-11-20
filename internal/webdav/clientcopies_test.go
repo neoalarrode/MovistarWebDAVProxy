@@ -24,6 +24,20 @@ func TestCopySummary(t *testing.T) {
 	if _, d := copySummary(solo, true, t0.Add(time.Hour)); strings.Contains(d, "Total") {
 		t.Fatalf("con una sola carpeta no hace falta total:\n%s", d)
 	}
+	// Los fallos de subida van dentro del bloque de su carpeta.
+	clientCopies.Lock()
+	if clientCopies.m == nil {
+		clientCopies.m = map[string]*copyRun{}
+	}
+	clientCopies.m["resumen"] = run
+	clientCopies.Unlock()
+	RecordUploadFailure("/emby/Netflix/Serie/T1/cap03.mkv", "409 Conflict")
+	clientCopies.Lock()
+	delete(clientCopies.m, "resumen")
+	clientCopies.Unlock()
+	if _, d := copySummary(run, true, t0.Add(3*time.Hour)); !strings.Contains(d, "1 errores\n⚠️ Serie/T1/cap03.mkv: 409 Conflict") {
+		t.Fatalf("el fallo debe ir en el bloque de Netflix:\n%s", d)
+	}
 	title, desc = copySummary(run, false, t0.Add(3*time.Hour))
 	if title != "Copia interrumpida" || !strings.Contains(desc, "25% de «Netflix»") {
 		t.Fatalf("%s | %s", title, desc)

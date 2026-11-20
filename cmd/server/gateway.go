@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httputil"
 	"net/url"
@@ -124,7 +125,42 @@ func (g *decryptedGateway) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	// Tras una subida no se pide al rclone interno que olvide el archivo: rclone 1.76
 	// ya guarda la fecha de X-OC-Mtime, y olvidar un archivo le hace releer la carpeta
 	// entera (y el chunker, los metadatos de cada archivo) en cada subida.
+	if r.Method == http.MethodPut {
+		// Una subida fallida se apunta en la copia del cliente a la que pertenece.
+		sw := &statusWriter{ResponseWriter: w}
+		g.upstream.ServeHTTP(sw, r)
+		if sw.status >= 400 {
+			webdav.RecordUploadFailure(r.URL.Path, fmt.Sprintf("%d %s", sw.status, http.StatusText(sw.status)))
+		}
+		return
+	}
 	g.upstream.ServeHTTP(w, r)
+}
+
+// statusWriter guarda el código de respuesta.
+type statusWriter struct {
+	http.ResponseWriter
+	status int
+}
+
+func (s *statusWriter) WriteHeader(code int) {
+	if s.status == 0 {
+		s.status = code
+	}
+	s.ResponseWriter.WriteHeader(code)
+}
+
+func (s *statusWriter) Write(b []byte) (int, error) {
+	if s.status == 0 {
+		s.status = http.StatusOK
+	}
+	return s.ResponseWriter.Write(b)
+}
+
+func (s *statusWriter) Flush() {
+	if f, ok := s.ResponseWriter.(http.Flusher); ok {
+		f.Flush()
+	}
 }
 
 // clientCopy guarda el estado de una copia de un cliente (POST con JSON, con las
