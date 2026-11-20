@@ -8,6 +8,7 @@ import (
 	"movistar-webdav-proxy/internal/rclonesvc"
 	"movistar-webdav-proxy/internal/vault"
 	"movistar-webdav-proxy/internal/webclient"
+	"movistar-webdav-proxy/internal/webdav"
 )
 
 // healthAlertAfter: un problema tiene que durar esto antes de avisar por Telegram;
@@ -69,6 +70,7 @@ func watchHealth(ctx context.Context, sess *webclient.Session, svc *rclonesvc.Se
 			for _, c := range checks {
 				c.step(now)
 			}
+			webdav.SweepClientCopies(now)
 		}
 	}
 }
