@@ -22,6 +22,8 @@ type LoginView struct {
 	tab      func() (context.Context, error) // pestaña chromedp actual
 	LoggedIn func() bool                     // opcional: estado de la sesión para mostrarlo en la página
 	mu       sync.Mutex                      // serializa la entrada para no mezclar eventos
+	// alwaysLogin: la pestaña ya se abre en el inicio de sesión (inicio aparte); no se la lleva a /login.
+	alwaysLogin bool
 }
 
 // NewLoginView crea la vista sobre una pestaña fija.
@@ -148,7 +150,7 @@ func (v *LoginView) serveIndex(w http.ResponseWriter, r *http.Request) {
 // y no se está ya en ella (o en el login de Telefónica). La portada de la web, sin
 // sesión válida, puede quedarse cargando (logo girando) sin enseñar el login.
 func (v *LoginView) openLoginPage() {
-	if v.LoggedIn == nil || v.LoggedIn() {
+	if v.alwaysLogin || v.LoggedIn == nil || v.LoggedIn() {
 		return
 	}
 	tab, err := v.tab()

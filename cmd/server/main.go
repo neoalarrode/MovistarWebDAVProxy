@@ -291,6 +291,7 @@ func main() {
 	if webSess != nil {
 		view := webSess.LoginView()
 		uiServer.SetWebLogin(view.Handler("/web-login/"))
+		uiServer.SetWebRelogin(webSess.ReloginView().Handler("/web-relogin/"))
 		acct := &accountState{}
 		go runWebHousekeeping(ctx, client, webSess.LoggedIn, acct)
 		uiServer.SetWebSessionStatus(func() map[string]interface{} { return acct.status(webSess.Status()) })

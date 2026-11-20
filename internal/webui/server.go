@@ -71,6 +71,7 @@ type Server struct {
 	sessionMu    sync.RWMutex
 	sessions     map[string]*webSession
 	webLogin     http.Handler // vista de inicio de sesión de la web (modo web), bajo /web-login/
+	webRelogin   http.Handler // inicio de sesión aparte sin cerrar el actual, bajo /web-relogin/
 	webStatus    func() map[string]interface{}
 	crypt        *rclonesvc.Service // WebDAV descifrado interno
 
@@ -88,6 +89,12 @@ func (s *Server) SetWebSessionStatus(f func() map[string]interface{}) {
 // de Movistar Cloud (modo web). Queda detrás de la autenticación del panel.
 func (s *Server) SetWebLogin(h http.Handler) {
 	s.webLogin = h
+}
+
+// SetWebRelogin publica en /web-relogin/ la vista para volver a iniciar sesión (p. ej.
+// con «No cerrar sesión») sin cerrar la sesión en uso. Detrás de la autenticación del panel.
+func (s *Server) SetWebRelogin(h http.Handler) {
+	s.webRelogin = h
 }
 
 type pendingLogin struct {
@@ -166,6 +173,9 @@ func (s *Server) Routes() http.Handler {
 	mux.HandleFunc("/diagnostic/compare", s.handleDiagnosticCompare)
 	if s.webLogin != nil {
 		mux.Handle("/web-login/", s.webLogin)
+	}
+	if s.webRelogin != nil {
+		mux.Handle("/web-relogin/", s.webRelogin)
 	}
 	mux.HandleFunc("/web_session", s.handleWebSession)
 	mux.HandleFunc("/transfers", s.handleTransfers)
