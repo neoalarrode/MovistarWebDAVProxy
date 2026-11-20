@@ -87,20 +87,49 @@ while ($true) {
     Start-Sleep -Seconds 2
 }
 
+# Estado para el panel de la Pi: total copiado, pendiente y tiempo restante. Se le
+# pregunta al rclone de la copia (control remoto solo local) y se manda a la Pi con
+# las credenciales del WebDAV. Si algo falla, la copia sigue igual.
+$rcCopia = @("--rc", "--rc-addr", "127.0.0.1:5574", "--rc-user", "nube", "--rc-pass", $RcPass)
+$destFile = Join-Path $cola ("{0}.destino" -f $PID) # no .txt: esos son los turnos de la cola
+$informe = $null
+try {
+    $cfg = (& $rclone config dump | ConvertFrom-Json).$Remoto
+    $estadoUrl = ([Uri]$cfg.url).GetLeftPart([UriPartial]::Authority) + "/.nube-estado"
+    $davPass = (& $rclone reveal $cfg.pass)
+    $auth = "Basic " + [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes("$($cfg.user):$davPass"))
+    $idCopia = "$env:COMPUTERNAME-$PID"
+    $informe = Start-Job -ArgumentList $RcPass, $estadoUrl, $auth, $idCopia, $destFile -ScriptBlock {
+        param($rcPass, $url, $auth, $id, $destFile)
+        $rcAuth = "Basic " + [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes("nube:$rcPass"))
+        while ($true) {
+            Start-Sleep -Seconds 3
+            try {
+                $st = Invoke-RestMethod -Method Post -Uri "http://127.0.0.1:5574/core/stats" -Headers @{ Authorization = $rcAuth } -TimeoutSec 5
+                $dest = if (Test-Path -LiteralPath $destFile) { (Get-Content -LiteralPath $destFile -Raw -Encoding UTF8).Trim() } else { "" }
+                $json = @{ id = $id; dest = $dest; bytes = [int64]$st.bytes; total_bytes = [int64]$st.totalBytes; speed = [double]$st.speed; eta = $st.eta; errors = [int]$st.errors } | ConvertTo-Json -Compress
+                Invoke-RestMethod -Method Post -Uri $url -Headers @{ Authorization = $auth } -ContentType "application/json" -Body ([Text.Encoding]::UTF8.GetBytes($json)) -TimeoutSec 5 | Out-Null
+            } catch { }
+        }
+    }
+} catch { }
+
 $fallos = 0
 $items = $Rutas | ForEach-Object { Get-Item -LiteralPath $_ }
 # Carpetas: cada una con su nombre dentro del destino.
 foreach ($d in $items | Where-Object { $_.PSIsContainer }) {
     Write-Host "`n$($d.Name)\  ->  $dest\$($d.Name)" -ForegroundColor Cyan
-    & $rclone copy $d.FullName "$base/$($d.Name)" --create-empty-src-dirs --exclude Thumbs.db --exclude desktop.ini --transfers 4 --progress --stats 2s
+    Set-Content -LiteralPath $destFile -Value ((($rel, $d.Name) | Where-Object { $_ }) -join '/') -Encoding UTF8
+    & $rclone copy $d.FullName "$base/$($d.Name)" --create-empty-src-dirs --exclude Thumbs.db --exclude desktop.ini --transfers 4 --progress --stats 2s @rcCopia
     if ($LASTEXITCODE -ne 0) { $fallos++ }
 }
 # Ficheros sueltos: juntos por carpeta de origen, varios a la vez.
 foreach ($g in $items | Where-Object { -not $_.PSIsContainer } | Group-Object DirectoryName) {
     Write-Host "`n$($g.Count) fichero(s) de $($g.Name)  ->  $dest" -ForegroundColor Cyan
+    Set-Content -LiteralPath $destFile -Value $(if ($rel) { $rel } else { "/" }) -Encoding UTF8
     $lista = New-TemporaryFile
     [IO.File]::WriteAllLines($lista.FullName, [string[]]($g.Group | ForEach-Object { $_.Name }))
-    & $rclone copy $g.Name $base --files-from-raw $lista --no-traverse --transfers 4 --progress --stats 2s
+    & $rclone copy $g.Name $base --files-from-raw $lista --no-traverse --transfers 4 --progress --stats 2s @rcCopia
     if ($LASTEXITCODE -ne 0) { $fallos++ }
     Remove-Item $lista
 }
@@ -108,7 +137,13 @@ foreach ($g in $items | Where-Object { -not $_.PSIsContainer } | Group-Object Di
 # Que la unidad vea ya lo subido.
 $olvidar = if ($rel) { @("dir=$rel") } else { @() }
 & $rclone rc vfs/forget @olvidar --url http://127.0.0.1:5572 --user nube --pass $RcPass 2>$null | Out-Null
-} finally { Remove-Item $turno -ErrorAction SilentlyContinue }
+} finally {
+    Remove-Item $turno, $destFile -ErrorAction SilentlyContinue
+    if ($informe) {
+        Stop-Job $informe -ErrorAction SilentlyContinue; Remove-Job $informe -Force -ErrorAction SilentlyContinue
+        try { Invoke-RestMethod -Method Post -Uri $estadoUrl -Headers @{ Authorization = $auth } -ContentType "application/json" -Body ([Text.Encoding]::UTF8.GetBytes((@{ id = $idCopia; done = $true } | ConvertTo-Json -Compress))) -TimeoutSec 5 | Out-Null } catch { }
+    }
+}
 
 if ($fallos) {
     Write-Host "`nHa habido $fallos error(es); lo que no se subió se puede volver a enviar (lo ya subido se salta)." -ForegroundColor Red

@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"net/http"
 	"net/http/httputil"
 	"net/url"
@@ -42,7 +43,15 @@ func newDecryptedGateway(rcloneAddr string, raw *webdav.Server, svc *rclonesvc.S
 	return &decryptedGateway{upstream: rp, raw: raw, svc: svc}
 }
 
+// clientCopyPath recibe el estado de las copias que hacen los clientes con rclone
+// (p. ej. «Enviar a > Nube» en Windows) para que el panel enseñe el total pendiente.
+const clientCopyPath = "/.nube-estado"
+
 func (g *decryptedGateway) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	if r.URL.Path == clientCopyPath {
+		g.clientCopy(w, r)
+		return
+	}
 	if len(vault.Folders()) == 0 {
 		g.raw.ServeHTTP(w, r)
 		return
@@ -116,6 +125,27 @@ func (g *decryptedGateway) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	// ya guarda la fecha de X-OC-Mtime, y olvidar un archivo le hace releer la carpeta
 	// entera (y el chunker, los metadatos de cada archivo) en cada subida.
 	g.upstream.ServeHTTP(w, r)
+}
+
+// clientCopy guarda el estado de una copia de un cliente (POST con JSON, con las
+// credenciales del WebDAV).
+func (g *decryptedGateway) clientCopy(w http.ResponseWriter, r *http.Request) {
+	if user, pass, ok := r.BasicAuth(); !ok || !g.svc.CheckAuth(user, pass) {
+		w.Header().Set("WWW-Authenticate", `Basic realm="WebDAV"`)
+		http.Error(w, "Unauthorized", http.StatusUnauthorized)
+		return
+	}
+	if r.Method != http.MethodPost {
+		http.Error(w, "POST", http.StatusMethodNotAllowed)
+		return
+	}
+	var c webdav.ClientCopy
+	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 64<<10)).Decode(&c); err != nil || c.ID == "" || len(c.ID) > 100 || len(c.Dest) > 1000 {
+		http.Error(w, "estado no válido", http.StatusBadRequest)
+		return
+	}
+	webdav.ReportClientCopy(c)
+	w.WriteHeader(http.StatusNoContent)
 }
 
 // rawPathFor traduce una ruta del WebDAV público a la ruta en bruto en la nube:

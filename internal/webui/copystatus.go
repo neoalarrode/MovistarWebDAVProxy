@@ -336,7 +336,58 @@ func readCopyStatusWith(dir, controlDir string, reads *readTracker) copyStatus {
 	// búfer) no se muestran.
 	st.Folders = buildFolders(dir, st, copyUploads)
 	fillFromProxy(&st)
+	applyClientCopies(&st)
 	return st
+}
+
+// applyClientCopies pone en la cabecera el total de las copias que mandan los
+// clientes (p. ej. «Enviar a > Nube» en Windows), si no hay copia del script.
+func applyClientCopies(st *copyStatus) {
+	copies := webdav.ClientCopies(30 * time.Second)
+	if st.Current != "" || len(copies) == 0 {
+		return
+	}
+	var bytes, total int64
+	var speed float64
+	var eta int64
+	var dests []string
+	newest := copies[0].Updated
+	for _, c := range copies {
+		bytes += c.Bytes
+		total += c.TotalBytes
+		speed += c.Speed
+		if c.ETA != nil && *c.ETA > eta {
+			eta = *c.ETA
+		}
+		st.ErrorCount += c.Errors
+		if c.Dest != "" {
+			dests = append(dests, c.Dest)
+		}
+		if c.Updated.After(newest) {
+			newest = c.Updated
+		}
+	}
+	st.Current = strings.Join(dests, ", ")
+	if st.Current == "" {
+		st.Current = "copia desde un cliente"
+	}
+	if len(copies) > 1 {
+		st.Current += fmt.Sprintf(" (%d envíos)", len(copies))
+	}
+	st.Transferred = humanBytes(float64(bytes))
+	st.Total = humanBytes(float64(total))
+	if total > 0 {
+		st.Percent = strconv.Itoa(int(bytes * 100 / total))
+	}
+	if speed > 0 {
+		st.Speed = humanBytes(speed) + "/s"
+	}
+	if eta > 0 {
+		st.ETA = humanDuration(eta)
+	} else if speed > 0 && total > bytes {
+		st.ETA = humanDuration(int64(float64(total-bytes) / speed))
+	}
+	st.StatsAt = newest.Format("2006/01/02 15:04:05")
 }
 
 func (s *Server) handleCopyStatus(w http.ResponseWriter, r *http.Request) {
