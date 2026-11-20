@@ -644,6 +644,27 @@
                 libs.appendChild(chip);
             });
 
+            // Sin el script de copia (p. ej. subidas desde Windows con rclone), la cabecera
+            // resume lo que el proxy está subiendo: carpeta, velocidad y cuándo acaba.
+            const ups = (d.uploading || []).filter(t => !t.idle);
+            if (!d.current && ups.length) {
+                const dirs = [...new Set(ups.map(t => t.name.includes('/') ? t.name.slice(0, t.name.lastIndexOf('/')) : '/'))];
+                let where = dirs[0];
+                if (dirs.length > 1) {
+                    const parts = dirs.map(x => x.split('/'));
+                    const common = [];
+                    for (let i = 0; parts.every(p => p[i] !== undefined && p[i] === parts[0][i]); i++) common.push(parts[0][i]);
+                    where = (common.join('/') || 'varias carpetas') + ` (${dirs.length} carpetas)`;
+                }
+                const size = ups.reduce((a, t) => a + (t.size || 0), 0), done = ups.reduce((a, t) => a + (t.bytes || 0), 0);
+                const speed = d.upload_speed || ups.reduce((a, t) => a + (t.speed || 0), 0);
+                const pctUp = size ? Math.floor(done * 100 / size) : 0;
+                document.getElementById('cp-current').textContent = `Subiendo ${ups.length} archivo(s) a ${where}`;
+                document.getElementById('cp-amount').textContent = `${fmtBytes(done)} / ${fmtBytes(size)} (${pctUp}%)`;
+                document.getElementById('cp-bar').style.width = pctUp + '%';
+                document.getElementById('cp-speed').textContent = fmtBytes(speed) + '/s';
+                document.getElementById('cp-eta').textContent = speed > 0 ? fmtETA(Math.round((size - done) / speed)) + ' (lo que está subiendo ahora)' : '-';
+            }
             renderTransfers('cp-up-box', 'cp-up', d.uploading, 'bg-blue-500');
             renderTransfers('cp-rd-box', 'cp-rd', d.reading, 'bg-emerald-500');
             renderTransfers('cp-q-box', 'cp-q', d.queued || [], 'bg-amber-500');
