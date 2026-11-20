@@ -6,26 +6,26 @@ import (
 	"time"
 )
 
-// El resumen suma las carpetas de un mismo envío (rclone empieza de cero en cada una).
+// Un bloque por carpeta enviada (rclone empieza sus cuentas en cada una) y el total.
 func TestCopySummary(t *testing.T) {
-	t0 := time.Now().Add(-2 * time.Hour)
-	run := &copyRun{started: t0, perDest: map[string]destTotals{}}
-	for _, c := range []ClientCopy{
-		{Dest: "Disney+/Serie A", Bytes: 1 << 30, Errors: 0},
-		{Dest: "Disney+/Serie B", Bytes: 2 << 30, Errors: 1},
-	} {
-		run.dests = append(run.dests, c.Dest)
-		run.perDest[c.Dest] = destTotals{bytes: c.Bytes, errors: c.Errors}
-		run.last = c
+	t0 := time.Now().Add(-3 * time.Hour)
+	run := &copyRun{started: t0, dests: []string{"Disney+", "Netflix"}, perDest: map[string]destTotals{
+		"Disney+": {bytes: 2 << 30, errors: 0, first: t0, last: t0.Add(2 * time.Hour)},
+		"Netflix": {bytes: 1 << 30, errors: 1, first: t0.Add(2 * time.Hour), last: t0.Add(3 * time.Hour)},
+	}}
+	run.last = ClientCopy{Dest: "Netflix", Bytes: 50, TotalBytes: 200}
+	title, desc := copySummary(run, true, t0.Add(3*time.Hour))
+	for _, want := range []string{"Disney+\n2.0 GB en 2 h 0 min", "0 errores", "Netflix\n1.0 GB en 1 h 0 min", "1 errores", "Total: 3.0 GB en 3 h 0 min"} {
+		if title != "Copia terminada" || !strings.Contains(desc, want) {
+			t.Fatalf("falta %q en:\n%s", want, desc)
+		}
 	}
-	title, desc := copySummary(run, true, t0.Add(2*time.Hour))
-	if title != "Copia terminada" || !strings.Contains(desc, "Disney+/Serie A y 1 carpeta(s) más") ||
-		!strings.Contains(desc, "3.0 GB en 2 h 0 min") || !strings.Contains(desc, "Errores: 1") {
-		t.Fatalf("%s | %s", title, desc)
+	solo := &copyRun{started: t0, dests: []string{"Disney+"}, perDest: map[string]destTotals{"Disney+": {bytes: 1 << 30, first: t0}}}
+	if _, d := copySummary(solo, true, t0.Add(time.Hour)); strings.Contains(d, "Total") {
+		t.Fatalf("con una sola carpeta no hace falta total:\n%s", d)
 	}
-	run.last = ClientCopy{Dest: "Disney+/Serie B", Bytes: 50, TotalBytes: 200}
-	title, desc = copySummary(run, false, t0.Add(2*time.Hour))
-	if title != "Copia interrumpida" || !strings.Contains(desc, "25%") {
+	title, desc = copySummary(run, false, t0.Add(3*time.Hour))
+	if title != "Copia interrumpida" || !strings.Contains(desc, "25% de «Netflix»") {
 		t.Fatalf("%s | %s", title, desc)
 	}
 }

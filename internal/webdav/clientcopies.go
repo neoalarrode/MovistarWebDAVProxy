@@ -37,8 +37,9 @@ type copyRun struct {
 }
 
 type destTotals struct {
-	bytes  int64
-	errors int
+	bytes       int64
+	errors      int
+	first, last time.Time // primer y último informe de esa carpeta (su duración)
 }
 
 var clientCopies struct {
@@ -72,7 +73,12 @@ func ReportClientCopy(c ClientCopy) {
 	if _, seen := run.perDest[c.Dest]; !seen {
 		run.dests = append(run.dests, c.Dest)
 	}
-	run.perDest[c.Dest] = destTotals{bytes: c.Bytes, errors: c.Errors}
+	t := run.perDest[c.Dest]
+	if t.first.IsZero() {
+		t.first = now
+	}
+	t.bytes, t.errors, t.last = c.Bytes, c.Errors, now
+	run.perDest[c.Dest] = t
 	clientCopies.Unlock()
 }
 
@@ -107,39 +113,47 @@ func ClientCopies(maxAge time.Duration) []ClientCopy {
 	return out
 }
 
-// copySummary es el texto del aviso de fin (o de corte) de una copia.
+// copySummary es el texto del aviso de fin (o de corte) de una copia: un bloque por
+// cada carpeta enviada y, si hay varias, el total.
 func copySummary(run *copyRun, finished bool, now time.Time) (title, desc string) {
+	var b strings.Builder
 	var bytes int64
 	var errs int
-	for _, t := range run.perDest {
+	for i, d := range run.dests {
+		t := run.perDest[d]
 		bytes += t.bytes
 		errs += t.errors
-	}
-	where := "(sin nombre)"
-	if len(run.dests) > 0 && run.dests[0] != "" {
-		where = run.dests[0]
-		if len(run.dests) > 1 {
-			where += fmt.Sprintf(" y %d carpeta(s) más", len(run.dests)-1)
+		name := d
+		if name == "" {
+			name = "(raíz)"
 		}
+		end := t.last
+		if i == len(run.dests)-1 {
+			end = now // la última carpeta acaba con el aviso
+		}
+		dur := end.Sub(t.first)
+		if i > 0 {
+			b.WriteString("\n\n")
+		}
+		fmt.Fprintf(&b, "%s\n%s en %s", name, copySize(float64(t.bytes)), copyDuration(dur))
+		if secs := dur.Seconds(); secs >= 1 && t.bytes > 0 {
+			fmt.Fprintf(&b, " · media %s/s", copySize(float64(t.bytes)/secs))
+		}
+		fmt.Fprintf(&b, " · %d errores", t.errors)
 	}
-	dur := now.Sub(run.started)
-	var b strings.Builder
-	fmt.Fprintf(&b, "%s\n%s en %s", where, copySize(float64(bytes)), copyDuration(dur))
-	if secs := dur.Seconds(); secs >= 1 && bytes > 0 {
-		fmt.Fprintf(&b, " · media %s/s", copySize(float64(bytes)/secs))
+	if len(run.dests) > 1 {
+		fmt.Fprintf(&b, "\n\nTotal: %s en %s", copySize(float64(bytes)), copyDuration(now.Sub(run.started)))
 	}
 	if finished {
-		fmt.Fprintf(&b, "\nErrores: %d", errs)
 		if errs > 0 {
-			b.WriteString(" (vuelve a enviar lo mismo: se salta lo ya subido)")
+			b.WriteString("\n\nVuelve a enviar lo mismo: se salta lo ya subido y reintenta lo que falló.")
 		}
 		return "Copia terminada", b.String()
 	}
-	last := run.last
-	if last.TotalBytes > 0 {
-		fmt.Fprintf(&b, "\nSe quedó en %d%% de la carpeta en curso", int(last.Bytes*100/last.TotalBytes))
+	if last := run.last; last.TotalBytes > 0 {
+		fmt.Fprintf(&b, "\n\nSe quedó en %d%% de «%s».", int(last.Bytes*100/last.TotalBytes), last.Dest)
 	}
-	b.WriteString("\nLa copia dejó de informar hace más de 10 minutos (¿ventana cerrada o PC apagado?). Al volver a enviarla se salta lo ya subido.")
+	b.WriteString("\nDejó de informar hace más de 10 minutos (¿ventana cerrada o PC apagado?). Al volver a enviarla se salta lo ya subido.")
 	return "Copia interrumpida", b.String()
 }
 
