@@ -324,11 +324,14 @@ def draw_session(win, y, x, h, w, sess, cstat, storage, crypt):
         else:
             sig = wf.get("signal")
             col = C_OK if sig is not None and sig >= -60 else (C_WARN if sig is not None and sig >= -70 else C_BAD)
+            # Barritas de cobertura: las encendidas en el color de la señal, el resto apagadas.
+            lit = 0 if sig is None else 4 if sig >= -55 else 3 if sig >= -65 else 2 if sig >= -75 else 1
+            put(win, cy + 9, cx, f"{'Wi-Fi':<14}", curses.color_pair(C_DIM))
+            for i, ch in enumerate("▂▄▆█"):
+                put(win, cy + 9, cx + 14 + i, ch, curses.color_pair(col) | curses.A_BOLD if i < lit else curses.color_pair(C_DIM) | curses.A_DIM)
             estado = "en uso" if via == "wifi" else "reserva"
-            enlace = f"{max(wf.get('rx', 0), wf.get('tx', 0)):.0f}Mb/s"
-            banda = ("5GHz" if wf["ghz"] > 4 else "2,4GHz") if wf.get("ghz") else ""
-            señal = f"{sig}dBm" if sig is not None else "?"
-            row(win, cy + 9, cx, cw, "Wi-Fi", " ".join(p for p in (f"● {estado}", señal, enlace, banda) if p), curses.color_pair(col))
+            enlace = f"{max(wf.get('rx', 0), wf.get('tx', 0)):.0f} Mb/s"
+            put(win, cy + 9, cx + 20, f"{estado} · {enlace}", curses.color_pair(C_OK if via == "wifi" else C_DIM), cw - 20)
     if via == "cable":
         row(win, cy + 8, cx, cw, "Conexión", f"● Cable  {detail}".rstrip(), curses.color_pair(C_OK))
     elif via == "wifi":
