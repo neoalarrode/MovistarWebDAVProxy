@@ -197,9 +197,21 @@ func main() {
 		fs.SetSyncInterval(syncInterval)
 	}
 
+	// El perfil desktop renueva la sesión al arrancar (OfficialStartup). La sincronización
+	// inicial espera a que termine: si no, tras un rato apagado sale con la sesión guardada,
+	// ya caducada, a la vez que la renovación, y se lleva un 401 (20/11/2026).
+	startupDone := make(chan struct{})
+	if !client.OfficialHeartbeatEnabled() {
+		close(startupDone)
+	}
+
 	// 2. Sincronización inicial de metadatos en segundo plano si hay credenciales activas
 	if metaStore != nil && !client.IsSessionExpired() && (client.WebMode() || cfg.RefreshToken != "" || cfg.DeviceID != "" || cfg.JSessionID != "") {
 		go func() {
+			select {
+			case <-startupDone:
+			case <-time.After(startupSyncWait):
+			}
 			logger.Log("[Metadata] 🔄 Iniciando sincronización de metadatos en segundo plano...")
 			if _, syncErr := metaStore.SyncChanges(client, false); syncErr != nil {
 				logger.Log("[Metadata] ⚠️ Error en sincronización inicial de metadatos: %v", syncErr)
@@ -216,7 +228,16 @@ func main() {
 	// 3. Workers KeepAlive y DeltaSync en segundo plano con Context para shutdown limpio
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	go runKeepAlive(ctx, client, webdavServer.IsRunning)
+	if client.OfficialHeartbeatEnabled() {
+		// Perfil desktop: arranque y latido como el cliente oficial de Windows.
+		go func() {
+			client.OfficialStartup()
+			close(startupDone)
+			runOfficialHeartbeat(ctx, client, webdavServer.IsRunning)
+		}()
+	} else {
+		go runKeepAlive(ctx, client, webdavServer.IsRunning)
+	}
 	go runDeltaSync(ctx, client, webdavServer.IsRunning, webdavServer.MetadataStore, webdavServer.FS, syncInterval)
 
 	webdavPort := "8080"
@@ -295,6 +316,7 @@ func main() {
 			}
 		}
 	}()
+	go uiServer.UpdateChecker().Start(ctx, time.Hour)
 	if webSess != nil {
 		view := webSess.LoginView()
 		uiServer.SetWebLogin(view.Handler("/web-login/"))
@@ -396,6 +418,45 @@ func computeKeepAliveInterval(expiresInStr string, consecutiveFailures int) time
 	return 5 * time.Minute
 }
 
+// runOfficialHeartbeat late como el cliente oficial de Windows: system/information
+// cada minuto y, cada cinco, subscription/plan, subscription, profile/role,
+// get-update-info y get-storage-space. Sustituye a runKeepAlive en el perfil desktop.
+func runOfficialHeartbeat(ctx context.Context, client *sapi.Client, isRunning func() bool) {
+	ticker := time.NewTicker(config.HeartbeatInterval())
+	defer ticker.Stop()
+	lastFull := time.Now()
+	expiredLogged := false
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+		}
+		if isRunning != nil && !isRunning() {
+			continue
+		}
+		if client.IsSessionExpired() {
+			if !expiredLogged {
+				logger.Log("[KeepAlive] ⏸️ Sesión expirada pendiente de revinculación en el panel web. Pausando el latido.")
+				expiredLogged = true
+			}
+			continue
+		}
+		expiredLogged = false
+		if err := client.OfficialMinuteBeat(); err != nil {
+			logger.Log("[KeepAlive] ⚠️ system/information: %v", err)
+		}
+		if time.Since(lastFull) >= config.HeartbeatFullInterval()-time.Second {
+			lastFull = time.Now()
+			if err := client.OfficialFiveMinuteBeat(); err != nil {
+				logger.Log("[KeepAlive] ⚠️ Ronda de 5 minutos con error (la sesión sigue activa salvo aviso): %v", err)
+			} else {
+				logger.Log("[KeepAlive] 💓 Sesión verificada en Movistar Cloud (HTTP 200).")
+			}
+		}
+	}
+}
+
 func runKeepAlive(ctx context.Context, client *sapi.Client, isRunning func() bool) {
 	consecutiveFailures := 0
 	timer := time.NewTimer(5 * time.Minute)
@@ -455,6 +516,10 @@ func runKeepAlive(ctx context.Context, client *sapi.Client, isRunning func() boo
 	}
 }
 
+// startupSyncWait: lo más que espera la sincronización inicial a que termine el
+// arranque como el cliente oficial (que normalmente tarda menos de un segundo).
+const startupSyncWait = 30 * time.Second
+
 func runDeltaSync(ctx context.Context, client *sapi.Client, isRunning func() bool, getMetaStore func() *cache.MetadataStore, getFS func() *webdav.MovistarFS, interval time.Duration) {
 	timer := time.NewTimer(interval)
 	defer timer.Stop()
@@ -497,6 +562,9 @@ func runDeltaSync(ctx context.Context, client *sapi.Client, isRunning func() boo
 						if getFS != nil {
 							if fs := getFS(); fs != nil {
 								fs.RecordSyncTime(time.Now())
+								// Si la sincronización del arranque falló, los vacíos no se
+								// cargaron (BootstrapLoad necesita los metadatos): se hace ahora.
+								fs.BootstrapEmptyFilesIfPending()
 								if changed > 0 {
 									fs.InvalidateCache(0)
 								}

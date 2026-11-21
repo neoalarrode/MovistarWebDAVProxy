@@ -42,6 +42,7 @@ func TestUploadGate_PriorityAndReserve(t *testing.T) {
 // Sin hueco libre la subida queda en cola (RAM) y, al liberarse un hueco, pasa a
 // subirse en flujo con lo que ya tenía guardado.
 func TestQueuedUpload_PromotesToStream(t *testing.T) {
+	t.Setenv("SAPI_CLIENT_PROFILE", "browser") // subida en flujo del modo web (sin el envío de la app oficial)
 	t.Setenv("WEBDAV_UPLOAD_SPOOL", "false")
 	t.Setenv("WEBDAV_BUFFER_MB", "1")
 	t.Setenv("WEBDAV_QUEUE_RAM_MB", "64")
@@ -186,6 +187,7 @@ func TestQueueRAMBudget_FloorOneBuffer(t *testing.T) {
 // Con escrituras pequeñas antes de encolarse (lo normal por SMB o el montaje), la
 // reserva de RAM del búfer no se cuenta dos veces: al terminar queda en cero.
 func TestQueuedUpload_NoRAMLeakWithSmallWrites(t *testing.T) {
+	t.Setenv("SAPI_CLIENT_PROFILE", "browser") // subida en flujo del modo web (sin el envío de la app oficial)
 	t.Setenv("WEBDAV_UPLOAD_SPOOL", "false")
 	t.Setenv("WEBDAV_BUFFER_MB", "1")
 	t.Setenv("WEBDAV_QUEUE_RAM_MB", "64")

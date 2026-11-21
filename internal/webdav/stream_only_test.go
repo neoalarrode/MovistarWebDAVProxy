@@ -62,6 +62,7 @@ func streamCloud(t *testing.T, uploadStatus int) (*Server, func() []byte) {
 // Con WEBDAV_UPLOAD_SPOOL=false la subida va solo en flujo: no crea temporal (el
 // directorio de temporales ni siquiera es escribible) y llega entera a la nube.
 func TestStreamOnly_NoTempFile(t *testing.T) {
+	t.Setenv("SAPI_CLIENT_PROFILE", "browser") // subida en flujo del modo web (sin el envío de la app oficial)
 	tmp := t.TempDir()
 	if err := os.Chmod(tmp, 0o500); err != nil {
 		t.Fatal(err)
@@ -92,6 +93,7 @@ func TestStreamOnly_NoTempFile(t *testing.T) {
 // Si la subida en flujo falla (p. ej. 408 del servidor de subida) y no hay copia
 // local, el PUT responde 503 con Retry-After para que el cliente la repita.
 func TestStreamOnly_FailureIs503(t *testing.T) {
+	t.Setenv("SAPI_CLIENT_PROFILE", "browser") // subida en flujo del modo web (sin el envío de la app oficial)
 	t.Setenv("WEBDAV_UPLOAD_SPOOL", "false")
 	t.Setenv("WEBDAV_BUFFER_MB", "1")
 	srv, _ := streamCloud(t, http.StatusRequestTimeout)
@@ -108,6 +110,7 @@ func TestStreamOnly_FailureIs503(t *testing.T) {
 // Por defecto, subida directa sin copia local (el cliente va a la velocidad de
 // subida); WEBDAV_UPLOAD_SPOOL=true la activa.
 func TestStreamOnly_DefaultIsDirect(t *testing.T) {
+	t.Setenv("SAPI_CLIENT_PROFILE", "browser") // en el modo web, sin copia local por defecto
 	t.Setenv("WEBDAV_UPLOAD_SPOOL", "")
 	if uploadSpoolEnabled() {
 		t.Fatal("por defecto no debe haber copia local")
@@ -121,6 +124,7 @@ func TestStreamOnly_DefaultIsDirect(t *testing.T) {
 // Sin copia local, la subida a la nube no se abre hasta tener el búfer inicial
 // (WEBDAV_BUFFER_MB) en memoria: con los primeros KB todavía no hay petición a SAPI.
 func TestStreamOnly_WaitsForInitialBuffer(t *testing.T) {
+	t.Setenv("SAPI_CLIENT_PROFILE", "browser") // subida en flujo del modo web (sin el envío de la app oficial)
 	t.Setenv("WEBDAV_UPLOAD_SPOOL", "false")
 	t.Setenv("WEBDAV_BUFFER_MB", "1")
 	var uploads int32
