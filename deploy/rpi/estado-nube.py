@@ -148,15 +148,7 @@ def net_status():
         return None, "sin conexión"
     dev = best[0]
     if dev.startswith("wl"):
-        sig = ""
-        try:
-            with open("/proc/net/wireless") as f:
-                for line in f:
-                    if line.strip().startswith(dev + ":"):
-                        sig = f"señal {float(line.split()[3].rstrip('.')):.0f} dBm"
-        except (OSError, ValueError, IndexError):
-            pass
-        return "wifi", sig
+        return "wifi", ""
     speed = ""
     try:
         with open(f"/sys/class/net/{dev}/speed") as f:
@@ -316,29 +308,23 @@ def draw_session(win, y, x, h, w, sess, cstat, storage, crypt):
         curses.color_pair(C_WARN if chunk else C_OK))
     if cstat is not None:
         row(win, cy + 7, cx, cw, "Límite subida", cstat.get("bwlimit") or "off")
+    # Solo la conexión en uso: por cable, el cable; por Wi-Fi, el Wi-Fi con sus barritas.
     via, detail = net_status()
-    wf = wifi_status()
-    if wf is not None:
-        if not wf:
-            row(win, cy + 9, cx, cw, "Wi-Fi", "● desconectado", curses.color_pair(C_BAD))
-        else:
-            sig = wf.get("signal")
-            col = C_OK if sig is not None and sig >= -60 else (C_WARN if sig is not None and sig >= -70 else C_BAD)
-            # Barritas de cobertura: las encendidas en el color de la señal, el resto apagadas.
-            lit = 0 if sig is None else 4 if sig >= -55 else 3 if sig >= -65 else 2 if sig >= -75 else 1
-            put(win, cy + 9, cx, f"{'Wi-Fi':<14}", curses.color_pair(C_DIM))
-            for i, ch in enumerate("▂▄▆█"):
-                put(win, cy + 9, cx + 14 + i, ch, curses.color_pair(col) | curses.A_BOLD if i < lit else curses.color_pair(C_DIM) | curses.A_DIM)
-            estado = "en uso" if via == "wifi" else "reserva"
-            enlace = f"{max(wf.get('rx', 0), wf.get('tx', 0)):.0f} Mb/s"
-            put(win, cy + 9, cx + 20, f"{estado} · {enlace}", curses.color_pair(C_OK if via == "wifi" else C_DIM), cw - 20)
     if via == "cable":
         row(win, cy + 8, cx, cw, "Conexión", f"● Cable  {detail}".rstrip(), curses.color_pair(C_OK))
     elif via == "wifi":
-        row(win, cy + 8, cx, cw, "Conexión", f"● Wi-Fi (sin cable)  {detail}".rstrip(), curses.color_pair(C_WARN) | curses.A_BOLD)
+        wf = wifi_status() or {}
+        sig = wf.get("signal")
+        col = C_OK if sig is not None and sig >= -60 else (C_WARN if sig is not None and sig >= -70 else C_BAD)
+        lit = 0 if sig is None else 4 if sig >= -55 else 3 if sig >= -65 else 2 if sig >= -75 else 1
+        row(win, cy + 8, cx, cw, "Conexión", "● Wi-Fi", curses.color_pair(C_WARN) | curses.A_BOLD)
+        # Barritas de cobertura: las encendidas en el color de la señal, el resto apagadas.
+        for k, ch in enumerate("▂▄▆█"):
+            put(win, cy + 8, cx + 22 + k, ch, curses.color_pair(col) | curses.A_BOLD if k < lit else curses.color_pair(C_DIM) | curses.A_DIM)
+        if wf.get("rx") or wf.get("tx"):
+            put(win, cy + 8, cx + 28, f"{max(wf.get('rx', 0), wf.get('tx', 0)):.0f} Mb/s", curses.color_pair(C_WARN), cw - 28)
     else:
         row(win, cy + 8, cx, cw, "Conexión", f"● {detail or '?'}", curses.color_pair(C_BAD) | curses.A_BOLD)
-
 
 def draw_system(win, y, x, h, w):
     box(win, y, x, h, w, "Raspberry Pi")
@@ -487,7 +473,7 @@ def main(stdscr):
         put(stdscr, 0, 1, f" Nube de Emby · {host} ", curses.color_pair(C_TITLE) | curses.A_BOLD | curses.A_REVERSE)
         put(stdscr, 0, max(W - 22, 1), datetime.now().strftime("%d/%m/%Y %H:%M:%S"), curses.color_pair(C_DIM))
         top = 1
-        top_h = 12
+        top_h = 11
         if W >= 90:
             lw = W // 2
             draw_session(stdscr, top, 0, top_h, lw, sess, cstat, storage, crypt)
