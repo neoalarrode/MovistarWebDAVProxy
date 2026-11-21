@@ -93,8 +93,9 @@ func TestTransportIsHTTP1(t *testing.T) {
 	srv.EnableHTTP2 = true
 	srv.StartTLS()
 	defer srv.Close()
+	// Solo se añade la CA del servidor de prueba: el resto, tal cual el de producción.
 	tr := transport.Clone()
-	tr.TLSClientConfig = srv.Client().Transport.(*http.Transport).TLSClientConfig
+	tr.TLSClientConfig.RootCAs = srv.Client().Transport.(*http.Transport).TLSClientConfig.RootCAs
 	resp, err := (&http.Client{Transport: tr}).Get(srv.URL)
 	if err != nil {
 		t.Fatal(err)
