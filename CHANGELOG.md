@@ -2,6 +2,70 @@
 
 Todos los cambios notables en **Movistar / O2 Cloud WebDAV Proxy** se documentan en este archivo.
 
+## [Sin publicar]
+
+### 🔐 Modo web: cifrado integrado por carpeta (`internal/vault`, `internal/rclonesvc`, `internal/rcloneconf`, `cmd/server/gateway.go`)
+- **Configuración por carpeta:** cada carpeta de la raíz puede tener su configuración de rclone (`crypt`, `chunker`…), guardada cifrada en el proxy y editable desde el panel. Solo admite tipos de remoto seguros.
+- **WebDAV público descifrado:** un rclone interno (`serve webdav` + `combine`) sirve en el puerto de siempre las carpetas configuradas ya descifradas y el resto tal cual. El WebDAV en bruto queda en `127.0.0.1:WEBDAV_RAW_PORT`.
+- **Montaje FUSE opcional** de la nube descifrada (`WEBDAV_MOUNT_PATH`).
+- **Importación inicial** de la clave desde `RCLONE_CRYPT_PASSWORD[2]` / `RCLONE_CRYPT_ROOT`.
+- **Panel y registros en claro:** el panel muestra los nombres descifrados, la actividad por archivo original y el usuario y la contraseña del WebDAV. Los registros también muestran las rutas descifradas.
+
+### 🚀 Subidas en modo web (`internal/webdav`, `internal/sapi`, `internal/autochunk`)
+- **Flujo directo sin copia local** (`WEBDAV_UPLOAD_SPOOL=false` por defecto en modo web). La subida a la nube se abre con 32 MB recibidos. Una subida fallida responde `503` para que el cliente la repita.
+- **Cola común de subidas** para todas las vías:
+  - prioridad para las normales sobre las masivas (`X-Upload-Priority: bulk`);
+  - RAM ajustada a la memoria libre (`WEBDAV_QUEUE_RAM_MB`) y disco opcional (`WEBDAV_QUEUE_DISK_MB`);
+  - contrapresión hacia el cliente cuando está llena.
+- **Envío `chunked` siempre:** con `Content-Length`, Movistar se queda callado ante un archivo que pasa de su límite; sin él, lo rechaza al instante (`MED-1048`).
+- **Subida parada:** se corta si Movistar deja de leer 60 s.
+- **Tamaño de trozo automático:** baja el `chunk_size` de las carpetas con `chunker` cuando Movistar limita el tamaño por subida (`MED-1048`), con aviso por Telegram y restablecimiento desde el panel.
+- **Límite de subida** ajustable en caliente (`WEBDAV_UPLOAD_BWLIMIT` o el panel).
+- **Nombres y fechas:** se rechazan los nombres de más de 255 caracteres y se conserva la fecha de modificación (`X-OC-Mtime`).
+
+### 🌐 Sesión web (`internal/webclient`)
+- **`/web-relogin/`:** nuevo inicio de sesión en un contexto aislado, sin cerrar el actual. Comprueba la sesión nueva con SAPI antes de adoptarla.
+- **La `PLC` nunca se borra tras renovaciones fallidas:** se reintenta cada 10 minutos.
+- **Robustez:**
+  - las llamadas desde la pestaña tienen plazo y no la bloquean;
+  - un solo relanzamiento de Chromium a la vez (antes podían quedar procesos huérfanos);
+  - User-Agent de Chrome normal en vez de `HeadlessChrome`.
+
+### 📶 Cambios de red (`internal/sapi/netreset.go`, `internal/auth/dialer_linux.go`)
+- **`TCP_USER_TIMEOUT` de 60 s** en todas las conexiones salientes (Linux).
+- **`POST /.red-cambio`:**
+  - corta al momento las peticiones con Movistar y cierra sus conexiones;
+  - relanza el navegador y avisa por Telegram.
+- **`503` + `Retry-After` en los `PUT` fallidos** durante los 3 minutos siguientes: el cliente reenvía el archivo en vez de darlo por perdido.
+
+### 🍓 Equipos pequeños
+- **ChaCha20-Poly1305 delante de AES-GCM** en el `ClientHello` en procesadores sin AES por hardware, como hace Chrome. Aplica a SAPI y a las subidas (`TLS_PREFER_CHACHA`).
+- **Menos memoria:**
+  - Chromium ahorrador y caché en `/tmp` limitada;
+  - rclone interno con `--use-mmap`;
+  - caché de archivos pequeños con tope (`WEBDAV_SMALLFILE_CACHE_MB`);
+  - contenido de los archivos diminutos guardado en la base local, para que los listados en frío sean rápidos.
+
+### 🤖 Telegram (`internal/notifier`, `cmd/server/botcommands.go`)
+- **Bot interactivo** con `/estado`, `/progreso`, `/subidas`, `/errores`, `/carpetas` y `/ayuda`. Solo responde en el chat configurado y sus botones actualizan el mismo mensaje.
+- **Configuración desde el panel en modo web,** con detección del chat.
+- **Formato HTML escapado** en los mensajes.
+- **Alertas nuevas:**
+  - sesión o descifrado caídos (y su recuperación);
+  - límite de carpetas (`FOL-1035`);
+  - ráfagas de errores de escritura;
+  - cambios de red.
+- **Conexión con Telegram por HTTP/1.1, propia y reiniciada en cada cambio de red:** con HTTP/2, los avisos compartían la conexión muerta de la escucha del bot.
+- **Informe de copias de clientes (`POST /.nube-estado`):** un cliente rclone manda su `core/stats`. El panel muestra el progreso total y, al terminar o cortarse, Telegram recibe un bloque por carpeta enviada con sus errores desglosados.
+
+### 🖥️ Panel
+- **Actividad en curso en tiempo real** (Server-Sent Events): subidas y lecturas, con totales de la copia.
+- **Datos propios del proxy:**
+  - cuota real en el WebDAV público;
+  - opciones de la cuenta;
+  - crear carpetas en la raíz;
+  - modo oscuro.
+
 ## [v2.6.8] - 2026-11-16
 
 ### 🛠️ Resiliencia en Subidas Largas de Hyper Backup (`HTTP 401` tras 1h)

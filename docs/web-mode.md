@@ -56,8 +56,18 @@ borra la cookie de sesión y recarga la web, que entra sola con una sesión nuev
 la `PLC` cambia en cada uso y, si dos peticiones la usaran a la vez, Movistar la
 anularía. Por la misma razón las subidas directas no la envían.
 
-El panel muestra cuándo caduca la sesión y si la renovación está activa. Si la
-renovación falla, el panel lo indica y basta con volver a iniciar sesión.
+El panel muestra cuándo caduca la sesión y si la renovación está activa. Si una
+renovación falla, se reintenta cada 10 minutos; la `PLC` nunca se borra por sí
+sola (solo al abrir a propósito `/web-login/`), así que un fallo pasajero de red o
+de Movistar no obliga a volver a entrar.
+
+### Volver a iniciar sesión sin cerrar la actual
+
+`/web-relogin/` abre un inicio de sesión en un contexto aislado del navegador,
+sin tocar la sesión en uso: las transferencias siguen mientras tanto. Al terminar
+(con «No cerrar sesión»), el proxy copia las cookies nuevas a la pestaña principal,
+recarga y comprueba con una llamada a SAPI que la sesión nueva funciona antes de
+darla por buena. Sirve para renovar la `PLC` o cambiar de cuenta sin cortar nada.
 
 > Si entras con el móvil y el SMS no hay `PLC`: la sesión durará 24 h y habrá que
 > volver a entrar.
@@ -92,6 +102,126 @@ papelera.
 | `WEBDAV_MAX_DOWNLOADS` | `1` (`4` en modo web) | Descargas simultáneas a la nube. |
 | `WEBDAV_MAX_UPLOADS` | `1` (`2` en modo web) | Subidas simultáneas a la nube. |
 | `SAPI_MAX_CONCURRENT` | `1` (en modo web, descargas + subidas + 2) | Llamadas simultáneas a SAPI. |
+| `WEBDAV_UPLOAD_SPOOL` | `false` en modo web (`true` en `desktop`) | Copia local de cada subida mientras se envía. En modo web no: la subida va en flujo directo y, si falla, el `PUT` responde `503` para que el cliente la repita. |
+| `WEBDAV_QUEUE_RAM_MB` | solo los búferes de las subidas en curso | RAM total para subidas que esperan hueco. Se ajusta a la memoria libre del equipo. Con la cola llena, el proxy deja de leer del cliente (contrapresión). |
+| `WEBDAV_QUEUE_DISK_MB` | `0` en modo web (sin límite en `desktop`) | Disco para subidas en cola cuando no caben en RAM. |
+| `WEBDAV_UPLOAD_BWLIMIT` | *(sin límite)* | Límite de subida (p. ej. `20M`, también desde el panel). |
+| `WEBDAV_SMALLFILE_CACHE_MB` | `32` | Memoria para el contenido de archivos pequeños ya leídos. |
+| `DOWNLOAD_URL_MAX_AGE` | `1h` | Cuánto se reutiliza una URL de descarga firmada. |
+| `TLS_PREFER_CHACHA` | según el procesador | `true`/`false` fuerza ChaCha20-Poly1305 delante de AES-GCM en el `ClientHello` (ver más abajo). |
+
+## Subidas en modo web
+
+- **Flujo directo sin copia local:** el contenido se reenvía a Movistar según
+  llega, sin escribir nada en disco. La subida a la nube no se abre hasta tener
+  32 MB en memoria, para que el servidor de subidas no vea una conexión sin datos.
+- **Cola común con prioridades:** todas las vías (WebDAV en bruto, WebDAV
+  descifrado, montaje) comparten los huecos de `WEBDAV_MAX_UPLOADS`. Las subidas
+  masivas (cabecera `X-Upload-Priority: bulk`) ceden el hueco a las normales.
+- **Envío `chunked`:** las subidas van siempre sin `Content-Length`. Con él,
+  Movistar lee el principio de un archivo que pasa de su límite y se queda
+  callado; sin él, lo rechaza al instante con `MED-1048`.
+- **Subida parada:** si Movistar deja de leer una subida durante 60 s, se corta y
+  el cliente la repite. Si es la única parada y no ha habido un cambio de red, cuenta
+  como rechazo por tamaño.
+- **Tamaño de trozo automático:** Movistar limita a veces el tamaño por subida de
+  una cuenta tras mucho volumen (p. ej. 100 MiB) y lo indica con `MED-1048`. Con
+  dos rechazos, el proxy baja el `chunk_size` de las carpetas con `chunker` por
+  debajo del límite (o a la mitad), recarga el rclone interno y avisa por
+  Telegram. Lo ya subido se sigue leyendo igual. Se puede restablecer desde el
+  panel.
+- **Nombres de más de 255 caracteres:** se rechazan con `400` (Movistar los
+  recorta sin avisar).
+- **Fecha de modificación:** se conserva la del original (`X-OC-Mtime`).
+
+## Cifrado integrado (rclone `crypt` + `chunker` por carpeta)
+
+Cada carpeta de la raíz de la nube puede tener su propia configuración de rclone
+(`crypt`, `chunker`…), guardada cifrada en el proxy y editable desde el panel. Solo
+se aceptan tipos de remoto seguros. El puerto WebDAV público sirve entonces la nube
+**ya descifrada**: un rclone interno (`serve webdav` con `combine`) monta cada
+carpeta con su configuración y deja el resto tal cual. El WebDAV en bruto (trozos
+cifrados) queda solo en `127.0.0.1:WEBDAV_RAW_PORT`.
+
+- El panel muestra los nombres en claro, la actividad por archivo original (no por
+  trozo) y el usuario y la contraseña del WebDAV.
+- Los registros muestran las rutas descifradas.
+- Las carpetas de la raíz se pueden crear desde el panel antes de configurarlas.
+- Opcionalmente, el proxy también monta la nube descifrada con FUSE
+  (`WEBDAV_MOUNT_PATH`).
+- La primera vez se puede importar la clave de `RCLONE_CRYPT_PASSWORD` /
+  `RCLONE_CRYPT_PASSWORD2` / `RCLONE_CRYPT_ROOT` (en claro u ofuscadas como en
+  `rclone.conf`).
+
+| Variable | Por defecto | Descripción |
+|---|---|---|
+| `WEBDAV_RAW_PORT` | `8090` | Puerto interno (solo `127.0.0.1`) del WebDAV en bruto. |
+| `RCLONE_BINARY` | `rclone` | Ejecutable del rclone interno. |
+| `WEBDAV_DECRYPTED_CACHE_MODE` | `off` | `--vfs-cache-mode` del rclone interno (`off`: subida directa). |
+| `WEBDAV_MOUNT_PATH` / `WEBDAV_MOUNT_ARGS` / `WEBDAV_MOUNT_CACHE_DIR` | *(sin montaje)* | Montaje FUSE de la nube descifrada. |
+
+## Cambios de red
+
+Si el equipo cambia de conexión (cable ↔ Wi-Fi, otra salida a Internet…), las
+conexiones abiertas con Movistar quedan muertas y antes tardaban minutos en
+caer. Ahora:
+
+- Todas las conexiones salientes usan `TCP_USER_TIMEOUT` de 60 s (Linux).
+- `POST /.red-cambio` (con las credenciales del WebDAV y cuerpo
+  `{"via":"…"}`) avisa al proxy del cambio. El proxy entonces:
+  - corta al momento las peticiones en curso con Movistar y cierra sus
+    conexiones;
+  - relanza el navegador de la sesión;
+  - avisa por Telegram.
+
+  Se puede llamar desde un *hook* del gestor de red (p. ej. `networkd-dispatcher`).
+- Durante los 3 minutos siguientes, un `PUT` fallido responde `503` +
+  `Retry-After` para que el cliente reenvíe el archivo en vez de darlo por
+  perdido. Esa parada tampoco cuenta como rechazo por tamaño.
+
+## Informe de copias desde el cliente
+
+Un cliente que copia con rclone (p. ej. un script de «Enviar a») puede mandar
+cada pocos segundos su `core/stats` a `POST /.nube-estado`. El cuerpo es JSON con:
+`id`, `dest`, `bytes`, `total_bytes`, `speed`, `eta`, `errors` y `done`.
+
+- El panel muestra entonces el progreso total del envío, no solo el archivo en
+  curso.
+- Al terminar (o si deja de informar 10 minutos), Telegram recibe un resumen: un
+  bloque por carpeta enviada, con tamaño, duración, velocidad media y los errores
+  desglosados, y el total.
+
+## Bot de Telegram
+
+Además de las alertas, el bot responde en el chat configurado (y solo ahí) a
+`/estado`, `/progreso`, `/subidas`, `/errores`, `/carpetas` y `/ayuda`. Las
+respuestas llevan botones que actualizan el mismo mensaje. El token y el chat se
+pueden configurar desde el panel también en modo web, con un botón para detectar
+el chat.
+
+Alertas nuevas:
+- sesión perdida o descifrado caído más de 2 minutos (y su recuperación);
+- límite de carpetas de la cuenta (`FOL-1035`);
+- ráfagas de errores de escritura;
+- cambio del tamaño de trozo;
+- cambios de red.
+
+## Equipos sin AES por hardware
+
+En procesadores sin instrucciones AES (p. ej. Raspberry Pi 4), AES-GCM va por
+software y es unas 5 veces más lento que ChaCha20, así que el TLS con Movistar se
+comía la CPU. El proxy hace lo mismo que Chrome (BoringSSL) en esos equipos: pone
+ChaCha20-Poly1305 delante en el `ClientHello`, sin cambiar el resto de la huella.
+Se aplica a las llamadas a SAPI y a las subidas. `TLS_PREFER_CHACHA` lo fuerza.
+
+## Menos memoria
+
+- Chromium arranca en modo ahorrador y con la caché en `/tmp` limitada.
+- El rclone interno usa `--use-mmap`.
+- No hay cachés en disco por defecto.
+- El contenido de los archivos diminutos (p. ej. las fichas del `chunker`) se
+  guarda en la base local, así que un listado en frío no los vuelve a pedir a la
+  nube.
 
 ## Uso con rclone `chunker` + `crypt`
 

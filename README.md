@@ -40,6 +40,13 @@ Proxy WebDAV nativo de alto rendimiento escrito en **Go** que traduce peticiones
 * 🚦 **Control de Concurrencia y Resiliencia WAF:** Gestiona subidas y descargas paralelas (`2` subidas / `4` descargas por defecto), huella TLS adaptada y protección frente a colisiones de nombres o bloqueos de CloudFront.
 * 🔔 **Alertas de Telegram desde el Arranque (v2.5.6):** Notificaciones automáticas desde el primer segundo si configuras `TELEGRAM_BOT_TOKEN` y `TELEGRAM_CHAT_ID` (aviso de inicio, cuenta sin vincular, caducidad de sesión o fallos críticos), sin necesidad de abrir antes el panel web.
 * 🌐 **Modo Web Opcional:** Alternativa basada en la sesión web oficial (`micloud.movistar.es`) con renovación automática cada 24 h si el flujo OAuth del cliente de escritorio falla. Ver [docs/web-mode.md](docs/web-mode.md).
+* 🔐 **Cifrado integrado por carpeta (modo web):** configuración de rclone (`crypt`, `chunker`…) por carpeta de la raíz, editable desde el panel. El WebDAV público sirve los archivos ya descifrados. Ver [Cifrado integrado](docs/web-mode.md#cifrado-integrado-rclone-crypt--chunker-por-carpeta).
+* 🍓 **Pensado también para equipos pequeños:**
+  * subidas en flujo directo sin nada en disco, con cola y contrapresión;
+  * tamaño de trozo automático si Movistar limita la subida (`MED-1048`);
+  * TLS con ChaCha20 en procesadores sin AES por hardware;
+  * cambios de red (cable ↔ Wi-Fi) sin conexiones colgadas.
+* 🤖 **Bot de Telegram interactivo:** comandos con botones (`/estado`, `/progreso`, `/subidas`, `/errores`, `/carpetas`) y resumen al terminar cada copia de un cliente rclone.
 * 🧹 **Filtro de Basura del SO y Panel de Transferencias:** Absorbe automáticamente archivos ocultos del sistema (`.DS_Store`, `desktop.ini`, `thumbs.db`) y muestra velocidad, progreso y logs en tiempo real desde la interfaz web.
 
 ---
@@ -197,7 +204,7 @@ Al incluir `TELEGRAM_BOT_TOKEN` y `TELEGRAM_CHAT_ID` en tu `docker-compose.yml`,
 * [🔧 Configuración Avanzada, Seguridad, Proxies Inversos y Variables de Entorno](docs/configuration.md)
 * [🛡️ Configurar Synology HyperBackup, Duplicati y Rclone (>4 GB y Cifrado)](docs/backup-clients.md)
 * [💻 Mapear como Unidad de Red en Windows, macOS y Linux](docs/network-drive.md)
-* [🌐 Modo Web: Sesión del Navegador y Renovación Automática](docs/web-mode.md)
+* [🌐 Modo Web: sesión del navegador, renovación automática, cifrado integrado, subidas, cambios de red y bot de Telegram](docs/web-mode.md)
 
 ---
 
