@@ -2,14 +2,23 @@ package notifier
 
 import (
 	"context"
+	"crypto/tls"
 	"net/http"
 	"sync"
 	"time"
 )
 
 // transport es el de todas las peticiones a Telegram: propio, para poder cerrar sus
-// conexiones cuando la Pi cambia de red.
-var transport = http.DefaultTransport.(*http.Transport).Clone()
+// conexiones cuando la Pi cambia de red. Solo HTTP/1.1: con HTTP/2 todo va por una
+// única conexión, la que tiene abierta la espera de getUpdates; al cambiar de red esa
+// conexión no está «ociosa», no se cierra, y los avisos (y su reintento) se mandaban
+// por ella, muerta, hasta agotar el plazo.
+var transport = func() *http.Transport {
+	t := http.DefaultTransport.(*http.Transport).Clone()
+	t.ForceAttemptHTTP2 = false
+	t.TLSNextProto = map[string]func(string, *tls.Conn) http.RoundTripper{}
+	return t
+}()
 
 func newClient(timeout time.Duration) *http.Client {
 	return &http.Client{Timeout: timeout, Transport: transport}

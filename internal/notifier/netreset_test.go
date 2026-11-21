@@ -84,3 +84,23 @@ func TestResetConnectionsRestartsPoll(t *testing.T) {
 	cancel()
 	<-done
 }
+
+// Telegram va por HTTP/1.1: los avisos no comparten conexión con la espera de getUpdates.
+func TestTransportIsHTTP1(t *testing.T) {
+	srv := httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte(r.Proto))
+	}))
+	srv.EnableHTTP2 = true
+	srv.StartTLS()
+	defer srv.Close()
+	tr := transport.Clone()
+	tr.TLSClientConfig = srv.Client().Transport.(*http.Transport).TLSClientConfig
+	resp, err := (&http.Client{Transport: tr}).Get(srv.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	if resp.ProtoMajor != 1 {
+		t.Fatalf("protocolo = %s, quería HTTP/1.1", resp.Proto)
+	}
+}
