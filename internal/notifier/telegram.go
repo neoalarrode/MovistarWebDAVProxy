@@ -29,6 +29,9 @@ type TelegramNotifier struct {
 	lastError  string
 }
 
+// sendRetryDelay: espera antes de reintentar un envío que falló por la red.
+var sendRetryDelay = 3 * time.Second
+
 // apiBase es la API de Telegram (variable para los tests).
 var apiBase = "https://api.telegram.org"
 
@@ -39,7 +42,7 @@ func init() {
 	Default = &TelegramNotifier{
 		botToken:   strings.TrimSpace(os.Getenv("TELEGRAM_BOT_TOKEN")),
 		chatID:     strings.TrimSpace(os.Getenv("TELEGRAM_CHAT_ID")),
-		client:     &http.Client{Timeout: 10 * time.Second},
+		client:     newClient(10 * time.Second),
 		lastAlerts: make(map[string]time.Time),
 	}
 }
@@ -67,7 +70,7 @@ func NewTelegramNotifier(botToken, chatID string) *TelegramNotifier {
 	Default = &TelegramNotifier{
 		botToken:   token,
 		chatID:     chat,
-		client:     &http.Client{Timeout: 10 * time.Second},
+		client:     newClient(10 * time.Second),
 		lastAlerts: make(map[string]time.Time),
 	}
 	return Default
@@ -169,13 +172,22 @@ func (t *TelegramNotifier) sendExtra(text string, asHTML bool, extra map[string]
 	}
 
 	apiURL := fmt.Sprintf("%s/bot%s/sendMessage", apiBase, token)
-	req, err := http.NewRequest("POST", apiURL, bytes.NewReader(bodyBytes))
-	if err != nil {
-		return fmt.Errorf("error preparando petición a Telegram")
+	post := func() (*http.Response, error) {
+		req, err := http.NewRequest("POST", apiURL, bytes.NewReader(bodyBytes))
+		if err != nil {
+			return nil, err
+		}
+		req.Header.Set("Content-Type", "application/json")
+		return t.client.Do(req)
 	}
-	req.Header.Set("Content-Type", "application/json")
-
-	resp, err := t.client.Do(req)
+	resp, err := post()
+	if err != nil {
+		// Un fallo de red suele ser una conexión que quedó en la red anterior: se
+		// reintenta una vez con conexiones nuevas.
+		transport.CloseIdleConnections()
+		time.Sleep(sendRetryDelay)
+		resp, err = post()
+	}
 	if err != nil {
 		safeErr := sanitizeTransportError(err, token)
 		t.mu.Lock()
@@ -312,7 +324,7 @@ func (t *TelegramNotifier) Credentials() (string, string) {
 // cambiar las activas (probar no debe dejar puesto lo que no se ha guardado).
 func SendTestWith(botToken, chatID, provider string) error {
 	t := &TelegramNotifier{botToken: strings.TrimSpace(botToken), chatID: strings.TrimSpace(chatID),
-		client: &http.Client{Timeout: 10 * time.Second}, lastAlerts: map[string]time.Time{}}
+		client: newClient(10 * time.Second), lastAlerts: map[string]time.Time{}}
 	return t.SendTestAlert(provider)
 }
 
@@ -326,7 +338,7 @@ type DetectedChat struct {
 // le han escrito (p. ej. tras mandarle /start).
 func DetectChats(botToken string) ([]DetectedChat, error) {
 	token := strings.TrimSpace(botToken)
-	client := &http.Client{Timeout: 10 * time.Second}
+	client := newClient(10 * time.Second)
 	resp, err := client.Get(fmt.Sprintf("%s/bot%s/getUpdates", apiBase, token))
 	if err != nil {
 		return nil, fmt.Errorf("error de red contactando con Telegram: %s", sanitizeTransportError(err, token))

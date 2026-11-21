@@ -35,7 +35,7 @@ type Command struct {
 func PollCommands(ctx context.Context, commands []Command, keyboard [][]Button, handle func(cmd, args string) string) {
 	markup := inlineKeyboard(keyboard)
 	alertMarkup.Store(markup)
-	client := &http.Client{Timeout: 70 * time.Second}
+	client := newClient(70 * time.Second)
 	started := time.Now()
 	offset := int64(0)
 	menuFor := "" // token con el que ya se publicó el menú de comandos
@@ -50,8 +50,20 @@ func PollCommands(ctx context.Context, commands []Command, keyboard [][]Button, 
 				menuFor = token
 			}
 		}
-		updates, err := getUpdates(ctx, client, token, offset)
+		rctx, rcancel := context.WithCancel(ctx)
+		pollCancel.Lock()
+		pollCancel.f = rcancel
+		pollCancel.Unlock()
+		updates, err := getUpdates(rctx, client, token, offset)
+		pollCancel.Lock()
+		pollCancel.f = nil
+		pollCancel.Unlock()
+		reset := rctx.Err() != nil && ctx.Err() == nil // cortada por un cambio de red
+		rcancel()
 		if err != nil {
+			if reset {
+				continue // se vuelve a escuchar al momento por la red nueva
+			}
 			if ctx.Err() == nil {
 				logger.Debug("[Telegram] getUpdates: %s", sanitizeTransportError(err, token))
 				sleepCtx(ctx, 15*time.Second)

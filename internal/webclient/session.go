@@ -77,6 +77,7 @@ type Session struct {
 	ctx         context.Context
 	cancel      context.CancelFunc
 	userAgent   string
+	launchMu    sync.Mutex // un solo relanzamiento a la vez (si no, quedan Chromium huérfanos)
 
 	stateMu    sync.RWMutex
 	loggedIn   bool
@@ -213,6 +214,15 @@ func (s *Session) start() error {
 func (s *Session) tab() (context.Context, error) {
 	s.mu.Lock()
 	ctx := s.ctx
+	s.mu.Unlock()
+	if ctx != nil && ctx.Err() == nil {
+		return ctx, nil
+	}
+	s.launchMu.Lock()
+	defer s.launchMu.Unlock()
+	// Otra llamada puede haberlo relanzado mientras se esperaba.
+	s.mu.Lock()
+	ctx = s.ctx
 	s.mu.Unlock()
 	if ctx != nil && ctx.Err() == nil {
 		return ctx, nil

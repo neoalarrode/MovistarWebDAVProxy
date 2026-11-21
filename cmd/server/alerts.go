@@ -82,18 +82,20 @@ func watchHealth(ctx context.Context, sess *webclient.Session, svc *rclonesvc.Se
 // conexiones con Movistar (las subidas en curso fallan y el cliente las reintenta
 // enteras), se relanza el navegador de la sesión web y se avisa por Telegram.
 func onNetworkChange(via string, sess *webclient.Session) {
+	notifier.ResetConnections()
 	n := sapi.ResetConnections(via)
+	// El aviso no espera al relanzamiento del navegador (tarda de 10 a 20 s).
+	if via == "wifi" {
+		go notifier.Alert("", "📶", "La Pi ha pasado al Wi-Fi",
+			"El cable no tiene conexión: todo sigue por Wi-Fi, más lento. Al volver el cable regresa sola.",
+			fmt.Sprintf("%d peticiones con Movistar reintentadas por la red nueva", n))
+	} else {
+		go notifier.Alert("", "🔌", "La Pi vuelve al cable",
+			"El cable tiene conexión otra vez: todo vuelve a ir por cable.", "")
+	}
 	if sess != nil {
 		if err := sess.ResetNetwork(); err != nil {
 			logger.Log("[WebSession] ❌ No se pudo relanzar el navegador tras el cambio de red: %v", err)
 		}
-	}
-	if via == "wifi" {
-		_ = notifier.Alert("", "📶", "La Pi ha pasado al Wi-Fi",
-			"El cable no tiene conexión: todo sigue por Wi-Fi, más lento. Al volver el cable regresa sola.",
-			fmt.Sprintf("%d peticiones con Movistar reintentadas por la red nueva", n))
-	} else {
-		_ = notifier.Alert("", "🔌", "La Pi vuelve al cable",
-			"El cable tiene conexión otra vez: todo vuelve a ir por cable.", "")
 	}
 }
